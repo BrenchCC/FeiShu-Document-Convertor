@@ -28,6 +28,9 @@ class TestConfig(unittest.TestCase):
                     fp.write("FEISHU_USER_REFRESH_TOKEN=r_1\n")
                     fp.write("FEISHU_USER_TOKEN_CACHE_PATH=.cache/token.json\n")
                     fp.write("FEISHU_WEBHOOK_URL=https://example.com/hook\n")
+                    fp.write("LLM_BASE_URL=https://example.com/v1\n")
+                    fp.write("LLM_API_KEY=sk_test\n")
+                    fp.write("LLM_MODEL=gpt-4.1-mini\n")
 
                 for key in [
                     "FEISHU_APP_ID",
@@ -35,7 +38,10 @@ class TestConfig(unittest.TestCase):
                     "FEISHU_USER_ACCESS_TOKEN",
                     "FEISHU_USER_REFRESH_TOKEN",
                     "FEISHU_USER_TOKEN_CACHE_PATH",
-                    "FEISHU_WEBHOOK_URL"
+                    "FEISHU_WEBHOOK_URL",
+                    "LLM_BASE_URL",
+                    "LLM_API_KEY",
+                    "LLM_MODEL"
                 ]:
                     os.environ.pop(key, None)
 
@@ -46,6 +52,9 @@ class TestConfig(unittest.TestCase):
                 self.assertEqual(config.feishu_user_refresh_token, "r_1")
                 self.assertEqual(config.feishu_user_token_cache_path, ".cache/token.json")
                 self.assertEqual(config.feishu_webhook_url, "https://example.com/hook")
+                self.assertEqual(config.llm_base_url, "https://example.com/v1")
+                self.assertEqual(config.llm_api_key, "sk_test")
+                self.assertEqual(config.llm_model, "gpt-4.1-mini")
         finally:
             os.chdir(original_cwd)
             os.environ.clear()

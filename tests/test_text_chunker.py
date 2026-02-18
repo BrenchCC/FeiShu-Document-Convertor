@@ -30,6 +30,19 @@ class TestTextChunker(unittest.TestCase):
         for chunk in chunks:
             self.assertLessEqual(len(chunk.encode("utf-8")), 10)
 
+    def test_split_markdown_by_lines_first_line_over_limit(self) -> None:
+        """Should split when first markdown line exceeds byte limit.
+
+        Args:
+            self: Test case instance.
+        """
+
+        content = "a" * 32
+        chunks = split_markdown_by_lines(content = content, max_bytes = 10)
+        self.assertGreaterEqual(len(chunks), 4)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk.encode("utf-8")), 10)
+
 
 if __name__ == "__main__":
     unittest.main()

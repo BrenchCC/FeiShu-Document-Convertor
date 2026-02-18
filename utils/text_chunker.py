@@ -50,14 +50,18 @@ def split_markdown_by_lines(content: str, max_bytes: int) -> List[str]:
 
     current = ""
     for line in lines:
+        line_bytes = len(line.encode("utf-8"))
+        if line_bytes > max_bytes:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(chunk_text_by_bytes(text = line, max_bytes = max_bytes))
+            continue
+
         candidate = current + line
         if current and len(candidate.encode("utf-8")) > max_bytes:
             chunks.append(current)
-            if len(line.encode("utf-8")) > max_bytes:
-                chunks.extend(chunk_text_by_bytes(text = line, max_bytes = max_bytes))
-                current = ""
-            else:
-                current = line
+            current = line
         else:
             current = candidate
 

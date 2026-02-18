@@ -1,5 +1,4 @@
 import logging
-import os
 import posixpath
 import re
 import urllib.parse
@@ -100,11 +99,12 @@ class OrchestrationPlanner:
             llm_max_calls: Max number of LLM calls per run.
         """
 
-        normalized_paths = sorted(
-            self._normalize_relative_path(path = item)
-            for item in markdown_paths
-            if self._normalize_relative_path(path = item)
-        )
+        normalized_paths = []
+        for path in markdown_paths:
+            normalized = self._normalize_relative_path(path = path)
+            if normalized:
+                normalized_paths.append(normalized)
+        normalized_paths = sorted(normalized_paths)
         if not normalized_paths:
             return ImportManifest(items = [])
 

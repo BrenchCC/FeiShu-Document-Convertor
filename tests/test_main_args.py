@@ -32,7 +32,15 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.space_name, "demo")
         self.assertEqual(args.space_id, "")
         self.assertEqual(args.write_mode, "folder")
+        self.assertEqual(args.structure_order, "toc_first")
+        self.assertEqual(args.toc_file, "TABLE_OF_CONTENTS.md")
+        self.assertEqual(args.folder_nav_doc, True)
+        self.assertEqual(args.folder_nav_title, "00-导航总目录")
+        self.assertEqual(args.llm_fallback, "toc_ambiguity")
+        self.assertEqual(args.llm_max_calls, 3)
         self.assertEqual(args.folder_subdirs, False)
+        self.assertEqual(args.folder_root_subdir, True)
+        self.assertEqual(args.folder_root_subdir_name, "")
 
     def test_parse_github(self) -> None:
         """Should parse github source arguments.
@@ -60,7 +68,10 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.ref, "main")
         self.assertEqual(args.space_id, "")
         self.assertEqual(args.write_mode, "folder")
+        self.assertEqual(args.structure_order, "toc_first")
         self.assertEqual(args.folder_subdirs, False)
+        self.assertEqual(args.folder_root_subdir, True)
+        self.assertEqual(args.folder_root_subdir_name, "")
 
     def test_parse_wiki_with_space_id(self) -> None:
         """Should parse wiki mode with existing space id.
@@ -146,6 +157,43 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.oauth_scope, "wiki:wiki offline_access")
         self.assertEqual(args.oauth_state, "state_1")
 
+    def test_parse_structure_and_llm_options(self) -> None:
+        """Should parse structure planning and LLM fallback options.
+
+        Args:
+            self: Test case instance.
+        """
+
+        argv = [
+            "prog",
+            "--source",
+            "local",
+            "--path",
+            "./docs",
+            "--write-mode",
+            "both",
+            "--structure-order",
+            "path",
+            "--toc-file",
+            "docs/toc.md",
+            "--no-folder-nav-doc",
+            "--folder-nav-title",
+            "目录总览",
+            "--llm-fallback",
+            "off",
+            "--llm-max-calls",
+            "0"
+        ]
+        with mock.patch("sys.argv", argv):
+            args = parse_args()
+
+        self.assertEqual(args.structure_order, "path")
+        self.assertEqual(args.toc_file, "docs/toc.md")
+        self.assertEqual(args.folder_nav_doc, False)
+        self.assertEqual(args.folder_nav_title, "目录总览")
+        self.assertEqual(args.llm_fallback, "off")
+        self.assertEqual(args.llm_max_calls, 0)
+
     def test_parse_folder_subdirs_flag(self) -> None:
         """Should parse folder hierarchy flag for folder mode.
 
@@ -167,6 +215,31 @@ class TestMainArgs(unittest.TestCase):
             args = parse_args()
 
         self.assertEqual(args.folder_subdirs, True)
+
+    def test_parse_folder_root_subdir_options(self) -> None:
+        """Should parse folder root subdir options.
+
+        Args:
+            self: Test case instance.
+        """
+
+        argv = [
+            "prog",
+            "--source",
+            "local",
+            "--path",
+            "./docs",
+            "--write-mode",
+            "folder",
+            "--no-folder-root-subdir",
+            "--folder-root-subdir-name",
+            "batch_demo"
+        ]
+        with mock.patch("sys.argv", argv):
+            args = parse_args()
+
+        self.assertEqual(args.folder_root_subdir, False)
+        self.assertEqual(args.folder_root_subdir_name, "batch_demo")
 
 
 if __name__ == "__main__":

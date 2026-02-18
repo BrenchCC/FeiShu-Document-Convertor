@@ -57,6 +57,7 @@ class FakeHttpClient:
         self.calls = []
         self.fail_once_invalid_token = False
         self.fail_once_folder_contention = False
+        self.fail_convert = False
         self.folder_children = {
             "fld_root": [
                 {
@@ -118,6 +119,13 @@ class FakeHttpClient:
                     }
                 )
         if "/open-apis/docx/v1/documents/blocks/convert" in url:
+            if self.fail_convert:
+                return FakeResponse(
+                    {
+                        "code": 99990001,
+                        "msg": "convert disabled"
+                    }
+                )
             return FakeResponse(
                 {
                     "code": 0,
@@ -342,6 +350,120 @@ class TestFeishuApiOptimizations(unittest.TestCase):
             self.assertEqual(image_url, "./a.png")
             self.assertTrue(block_id)
 
+    def test_write_markdown_by_semantic_blocks(self) -> None:
+        """Markdown write should convert by semantic blocks.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_x",
+            convert_max_bytes = 4000
+        )
+
+        markdown = (
+            "# Title\n\n"
+            "Paragraph with **bold**.\n\n"
+            "| A | B |\n"
+            "| --- | --- |\n"
+            "| 1 | 2 |\n\n"
+            "```python\n"
+            "print('x')\n"
+            "```\n"
+        )
+        doc_writer.write_markdown_with_fallback(
+            document_id = "doc_x",
+            content = markdown
+        )
+
+        convert_calls = [
+            call for call in http_client.calls
+            if "/open-apis/docx/v1/documents/blocks/convert" in call.get("url", "")
+        ]
+        self.assertGreaterEqual(len(convert_calls), 3)
+
+    def test_native_block_fallback_when_convert_fails(self) -> None:
+        """Convert failure should fallback to native blocks instead of raw markdown.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        http_client.fail_convert = True
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_x",
+            convert_max_bytes = 4000
+        )
+
+        markdown = (
+            "# Title\n\n"
+            "Paragraph with **bold** and [link](https://example.com).\n\n"
+            "- item one\n"
+            "1. ordered one\n"
+            "> quoted\n\n"
+            "| A | B |\n"
+            "| --- | --- |\n"
+            "| **x** | y |\n"
+        )
+        doc_writer.write_markdown_with_fallback(
+            document_id = "doc_x",
+            content = markdown
+        )
+
+        convert_calls = [
+            call for call in http_client.calls
+            if "/open-apis/docx/v1/documents/blocks/convert" in call.get("url", "")
+        ]
+        self.assertGreaterEqual(len(convert_calls), 1)
+
+        children_calls = [
+            call for call in http_client.calls
+            if "/open-apis/docx/v1/documents/doc_x/blocks/doc_x/children" in call.get("url", "")
+            and call.get("method") == "POST"
+        ]
+        self.assertGreaterEqual(len(children_calls), 1)
+
+        written_blocks = []
+        for call in children_calls:
+            body = call.get("json_body", {}) or {}
+            written_blocks.extend(body.get("children", []))
+
+        self.assertTrue(any(block.get("block_type") == 3 for block in written_blocks))
+        self.assertTrue(any("heading1" in block for block in written_blocks))
+
+        has_bold = False
+        has_link = False
+        for block in written_blocks:
+            for field_name in [
+                "text",
+                "heading1",
+                "heading2",
+                "heading3",
+                "bullet",
+                "ordered",
+                "quote"
+            ]:
+                payload = block.get(field_name, {})
+                elements = payload.get("elements", [])
+                for element in elements:
+                    style = ((element.get("text_run") or {}).get("text_element_style") or {})
+                    if style.get("bold"):
+                        has_bold = True
+                    link = style.get("link", {})
+                    if isinstance(link, dict) and link.get("url"):
+                        has_link = True
+        self.assertTrue(has_bold)
+        self.assertTrue(has_link)
+
     def test_ensure_folder_path_creates_missing_segments(self) -> None:
         """Folder hierarchy should reuse existing and create missing folders.
 
@@ -396,6 +518,34 @@ class TestFeishuApiOptimizations(unittest.TestCase):
             if call.get("url", "").endswith("/open-apis/drive/v1/files/create_folder")
         ]
         self.assertEqual(len(create_folder_calls), 2)
+
+    def test_ensure_folder_name_truncated_by_bytes(self) -> None:
+        """Folder segment should be truncated to API byte limit.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_root",
+            convert_max_bytes = 20
+        )
+
+        long_name = "测" * 120
+        doc_writer.ensure_folder_path(relative_dir = long_name)
+
+        create_folder_calls = [
+            call for call in http_client.calls
+            if call.get("url", "").endswith("/open-apis/drive/v1/files/create_folder")
+        ]
+        self.assertEqual(len(create_folder_calls), 1)
+        sent_name = (create_folder_calls[0].get("json_body") or {}).get("name", "")
+        self.assertTrue(sent_name)
+        self.assertLessEqual(len(sent_name.encode("utf-8")), 256)
 
     def test_webhook_notify_chunked(self) -> None:
         """Webhook notification should split overlong messages.

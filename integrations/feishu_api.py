@@ -18,6 +18,7 @@ from core.exceptions import ApiResponseError
 from core.exceptions import HttpRequestError
 from utils.http_client import HttpClient
 from utils.http_client import MultipartFile
+from utils.markdown_block_parser import split_markdown_to_semantic_blocks
 from utils.text_chunker import chunk_text_by_bytes
 from utils.text_chunker import split_markdown_by_lines
 from data.models import AssetRef
@@ -516,6 +517,35 @@ class DocWriterService(FeishuServiceBase):
     FOLDER_CREATE_RETRY_CODE = "1061045"
     FOLDER_CREATE_MAX_ATTEMPTS = 4
     FOLDER_CREATE_BACKOFF_SECONDS = 0.05
+    CREATE_CHILDREN_BATCH_SIZE = 20
+    NATIVE_TEXT_BLOCK_MAX_BYTES = 3000
+
+    BLOCK_TYPE_TEXT = 2
+    BLOCK_TYPE_HEADING_BASE = 2
+    BLOCK_TYPE_BULLET = 12
+    BLOCK_TYPE_ORDERED = 13
+    BLOCK_TYPE_CODE = 14
+    BLOCK_TYPE_QUOTE = 15
+
+    INLINE_MARKDOWN_PATTERN = re.compile(
+        (
+            r"\[(?P<link_text>[^\]]+)\]\((?P<link_url>[^)]+)\)"
+            r"|\*\*(?P<bold>[^*]+)\*\*"
+            r"|__(?P<bold_underline>[^_]+)__"
+            r"|`(?P<inline_code>[^`]+)`"
+            r"|~~(?P<strike>[^~]+)~~"
+            r"|\*(?P<italic>[^*\n]+)\*"
+            r"|_(?P<italic_underscore>[^_\n]+)_"
+        )
+    )
+
+    HEADING_LINE_PATTERN = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
+    BULLET_LINE_PATTERN = re.compile(r"^\s{0,3}[-*+]\s+(.+?)\s*$")
+    ORDERED_LINE_PATTERN = re.compile(r"^\s{0,3}\d+[.)]\s+(.+?)\s*$")
+    QUOTE_LINE_PATTERN = re.compile(r"^\s{0,3}>\s?(.+?)\s*$")
+    TABLE_ALIGN_PATTERN = re.compile(
+        r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$"
+    )
 
     def __init__(
         self,
@@ -590,27 +620,30 @@ class DocWriterService(FeishuServiceBase):
             "url": doc_url
         }
 
-    def ensure_folder_path(self, relative_dir: str) -> str:
+    def ensure_folder_path(self, relative_dir: str, root_folder_token: str = "") -> str:
         """Ensure folder path exists under configured root folder.
 
         Args:
             relative_dir: Relative directory path from source markdown file.
+            root_folder_token: Optional root folder token override.
         """
 
-        if not self.folder_token:
+        effective_root_token = root_folder_token or self.folder_token
+        if not effective_root_token:
             raise ApiResponseError(
                 "FEISHU_FOLDER_TOKEN is required when using folder hierarchy mode."
             )
 
         normalized = relative_dir.strip().replace("\\", "/").strip("/")
         if not normalized:
-            return self.folder_token
+            return effective_root_token
 
-        cached = self._folder_path_cache.get(normalized, "")
+        cache_key = f"{effective_root_token}:{normalized}"
+        cached = self._folder_path_cache.get(cache_key, "")
         if cached:
             return cached
 
-        current_parent = self.folder_token
+        current_parent = effective_root_token
         segments = [segment for segment in normalized.split("/") if segment]
         current_path = ""
 
@@ -620,7 +653,8 @@ class DocWriterService(FeishuServiceBase):
                 continue
 
             current_path = f"{current_path}/{folder_name}" if current_path else folder_name
-            cached_token = self._folder_path_cache.get(current_path, "")
+            current_cache_key = f"{effective_root_token}:{current_path}"
+            cached_token = self._folder_path_cache.get(current_cache_key, "")
             if cached_token:
                 current_parent = cached_token
                 continue
@@ -635,10 +669,10 @@ class DocWriterService(FeishuServiceBase):
                     folder_name = folder_name
                 )
 
-            self._folder_path_cache[current_path] = child_token
+            self._folder_path_cache[current_cache_key] = child_token
             current_parent = child_token
 
-        self._folder_path_cache[normalized] = current_parent
+        self._folder_path_cache[cache_key] = current_parent
         return current_parent
 
     def _normalize_folder_name(self, name: str) -> str:
@@ -901,7 +935,16 @@ class DocWriterService(FeishuServiceBase):
                     len(chunk.encode("utf-8")),
                     str(exc)
                 )
-                for sub_chunk in self._split_chunk_for_retry(chunk = chunk):
+                split_chunks = self._split_chunk_for_retry(chunk = chunk)
+                if len(split_chunks) == 1 and split_chunks[0] == chunk:
+                    logger.warning(
+                        "descendant split made no progress: depth = %d, bytes = %d",
+                        depth,
+                        len(chunk.encode("utf-8"))
+                    )
+                    raise
+
+                for sub_chunk in split_chunks:
                     self._convert_and_append_chunk(
                         document_id = document_id,
                         chunk = sub_chunk,
@@ -1091,7 +1134,7 @@ class DocWriterService(FeishuServiceBase):
         image_token_map: Optional[Dict[str, str]] = None,
         image_block_handler: Optional[Callable[[str, str], None]] = None
     ) -> None:
-        """Write markdown with automatic convert fallback.
+        """Write markdown by semantic blocks with per-block fallback.
 
         Args:
             document_id: Feishu document id.
@@ -1101,7 +1144,7 @@ class DocWriterService(FeishuServiceBase):
         """
 
         try:
-            self.convert_markdown(
+            self.write_markdown_by_block_matching(
                 document_id = document_id,
                 content = content,
                 image_token_map = image_token_map,
@@ -1110,11 +1153,545 @@ class DocWriterService(FeishuServiceBase):
             return
         except Exception as exc:
             logger.warning(
-                "convert failed for document_id = %s, fallback enabled: %s",
+                "block matching write failed for document_id = %s, fallback whole doc: %s",
                 document_id,
                 str(exc)
             )
-            self.append_fallback_text(document_id = document_id, content = content)
+            try:
+                self.write_markdown_by_native_blocks(
+                    document_id = document_id,
+                    content = content
+                )
+            except Exception as native_exc:
+                logger.warning(
+                    "native block write failed for document_id = %s, fallback raw markdown: %s",
+                    document_id,
+                    str(native_exc)
+                )
+                self.append_fallback_text(document_id = document_id, content = content)
+
+    def write_markdown_by_block_matching(
+        self,
+        document_id: str,
+        content: str,
+        image_token_map: Optional[Dict[str, str]] = None,
+        image_block_handler: Optional[Callable[[str, str], None]] = None
+    ) -> None:
+        """Write markdown by semantic block matching and per-block convert.
+
+        Args:
+            document_id: Feishu document id.
+            content: Markdown content.
+            image_token_map: Optional mapping from image url/path to media token.
+            image_block_handler: Callback invoked with (image_url, real_block_id).
+        """
+
+        segments = split_markdown_to_semantic_blocks(content = content)
+        if not segments:
+            return
+
+        converted_chunks = 0
+        fallback_chunks = 0
+        for index, segment in enumerate(segments, start = 1):
+            chunks = split_markdown_by_lines(
+                content = segment.content,
+                max_bytes = self.convert_max_bytes
+            )
+            for chunk in chunks:
+                if not chunk.strip():
+                    continue
+
+                # 对表格块直接使用降级策略，避免飞书API参数不合法错误
+                if segment.kind == "table":
+                    logger.info(
+                        "Direct fallback for table block: document_id = %s, segment = %d/%d",
+                        document_id,
+                        index,
+                        len(segments)
+                    )
+                    self._write_segment_by_native_blocks(
+                        document_id = document_id,
+                        segment_kind = segment.kind,
+                        segment_content = chunk
+                    )
+                    fallback_chunks += 1
+                    continue
+
+                try:
+                    self._convert_and_append_chunk(
+                        document_id = document_id,
+                        chunk = chunk,
+                        image_token_map = image_token_map,
+                        image_block_handler = image_block_handler,
+                        depth = 0
+                    )
+                    converted_chunks += 1
+                except Exception as exc:
+                    logger.warning(
+                        (
+                            "semantic convert failed for document_id = %s, block = %s, "
+                            "segment = %d/%d, fallback chunk bytes = %d, err = %s"
+                        ),
+                        document_id,
+                        segment.kind,
+                        index,
+                        len(segments),
+                        len(chunk.encode("utf-8")),
+                        str(exc)
+                    )
+                    self._write_segment_by_native_blocks(
+                        document_id = document_id,
+                        segment_kind = segment.kind,
+                        segment_content = chunk
+                    )
+                    fallback_chunks += 1
+
+        logger.info(
+            (
+                "markdown block matching written: document_id = %s, segments = %d, "
+                "converted_chunks = %d, fallback_chunks = %d"
+            ),
+            document_id,
+            len(segments),
+            converted_chunks,
+            fallback_chunks
+        )
+
+    def write_markdown_by_native_blocks(self, document_id: str, content: str) -> None:
+        """Write markdown using native create-children blocks without convert API.
+
+        Args:
+            document_id: Feishu document id.
+            content: Markdown content.
+        """
+
+        segments = split_markdown_to_semantic_blocks(content = content)
+        if not segments:
+            return
+
+        for segment in segments:
+            self._write_segment_by_native_blocks(
+                document_id = document_id,
+                segment_kind = segment.kind,
+                segment_content = segment.content
+            )
+
+    def _write_segment_by_native_blocks(
+        self,
+        document_id: str,
+        segment_kind: str,
+        segment_content: str
+    ) -> None:
+        """Write one semantic segment through native create-children calls.
+
+        Args:
+            document_id: Feishu document id.
+            segment_kind: Semantic segment kind.
+            segment_content: Segment markdown content.
+        """
+
+        blocks = self._build_native_blocks_from_segment(
+            segment_kind = segment_kind,
+            segment_content = segment_content
+        )
+        if not blocks:
+            return
+        self._append_native_blocks(
+            document_id = document_id,
+            blocks = blocks
+        )
+
+    def _build_native_blocks_from_segment(
+        self,
+        segment_kind: str,
+        segment_content: str
+    ) -> list[dict]:
+        """Build native docx blocks from one markdown segment.
+
+        Args:
+            segment_kind: Semantic segment kind.
+            segment_content: Segment markdown content.
+        """
+
+        stripped = segment_content.strip("\n")
+        if not stripped:
+            return []
+
+        if segment_kind == "heading":
+            block = self._build_heading_native_block(line = stripped)
+            return [block] if block else []
+
+        if segment_kind == "list_or_quote":
+            return self._build_list_or_quote_native_blocks(content = stripped)
+
+        if segment_kind == "code_fence":
+            code_content = self._strip_code_fence(content = stripped)
+            return self._build_textual_blocks_payload(
+                block_type = self.BLOCK_TYPE_CODE,
+                field_name = "code",
+                text = code_content,
+                parse_inline = False
+            )
+
+        if segment_kind == "table":
+            return self._build_table_fallback_blocks(content = stripped)
+
+        return self._build_textual_blocks_payload(
+            block_type = self.BLOCK_TYPE_TEXT,
+            field_name = "text",
+            text = stripped,
+            parse_inline = True
+        )
+
+    def _build_heading_native_block(self, line: str) -> Optional[dict]:
+        """Build one heading block from one markdown heading line.
+
+        Args:
+            line: Markdown heading line.
+        """
+
+        match = self.HEADING_LINE_PATTERN.match(line.strip())
+        if not match:
+            return None
+
+        level_marks = match.group(1)
+        raw_text = match.group(2).strip()
+        level = min(max(len(level_marks), 1), 6)
+        field_name = f"heading{level}"
+        block_type = self.BLOCK_TYPE_HEADING_BASE + level
+        return self._build_textual_block_payload(
+            block_type = block_type,
+            field_name = field_name,
+            text = raw_text,
+            parse_inline = True
+        )
+
+    def _build_list_or_quote_native_blocks(self, content: str) -> list[dict]:
+        """Build list/quote blocks from one segment.
+
+        Args:
+            content: Segment markdown content.
+        """
+
+        blocks: list[dict] = []
+        for raw_line in content.splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                continue
+
+            quote_match = self.QUOTE_LINE_PATTERN.match(line)
+            if quote_match:
+                blocks.append(
+                    self._build_textual_block_payload(
+                        block_type = self.BLOCK_TYPE_QUOTE,
+                        field_name = "quote",
+                        text = quote_match.group(1).strip(),
+                        parse_inline = True
+                    )
+                )
+                continue
+
+            ordered_match = self.ORDERED_LINE_PATTERN.match(line)
+            if ordered_match:
+                blocks.append(
+                    self._build_textual_block_payload(
+                        block_type = self.BLOCK_TYPE_ORDERED,
+                        field_name = "ordered",
+                        text = ordered_match.group(1).strip(),
+                        parse_inline = True
+                    )
+                )
+                continue
+
+            bullet_match = self.BULLET_LINE_PATTERN.match(line)
+            if bullet_match:
+                blocks.append(
+                    self._build_textual_block_payload(
+                        block_type = self.BLOCK_TYPE_BULLET,
+                        field_name = "bullet",
+                        text = bullet_match.group(1).strip(),
+                        parse_inline = True
+                    )
+                )
+                continue
+
+            blocks.append(
+                self._build_textual_block_payload(
+                    block_type = self.BLOCK_TYPE_TEXT,
+                    field_name = "text",
+                    text = line.strip(),
+                    parse_inline = True
+                )
+            )
+
+        return blocks
+
+    def _build_table_fallback_blocks(self, content: str) -> list[dict]:
+        """Build fallback text blocks from markdown table rows.
+
+        Args:
+            content: Table markdown content.
+        """
+
+        rows = [line.rstrip() for line in content.splitlines() if line.strip()]
+        data_rows = [
+            row for row in rows
+            if not self.TABLE_ALIGN_PATTERN.match(row.strip())
+        ]
+        if not data_rows:
+            return []
+
+        blocks: list[dict] = []
+        for index, row in enumerate(data_rows):
+            cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+            if not any(cells):
+                continue
+
+            if index == 0:
+                normalized_cells = []
+                for cell in cells:
+                    if not cell:
+                        continue
+                    if "**" in cell:
+                        normalized_cells.append(cell)
+                    else:
+                        normalized_cells.append(f"**{cell}**")
+                row_text = " | ".join(normalized_cells)
+            else:
+                row_text = " | ".join(cells)
+
+            blocks.append(
+                self._build_textual_block_payload(
+                    block_type = self.BLOCK_TYPE_TEXT,
+                    field_name = "text",
+                    text = row_text,
+                    parse_inline = True
+                )
+            )
+        return blocks
+
+    def _strip_code_fence(self, content: str) -> str:
+        """Remove fenced markdown wrapper and keep code body.
+
+        Args:
+            content: Raw fenced markdown block.
+        """
+
+        lines = content.splitlines()
+        if len(lines) >= 2 and (
+            lines[0].strip().startswith("```")
+            or lines[0].strip().startswith("~~~")
+        ):
+            fence = lines[0].strip()[:3]
+            code_lines = lines[1:]
+            if code_lines and code_lines[-1].strip().startswith(fence):
+                code_lines = code_lines[:-1]
+            return "\n".join(code_lines)
+        return content
+
+    def _build_textual_blocks_payload(
+        self,
+        block_type: int,
+        field_name: str,
+        text: str,
+        parse_inline: bool
+    ) -> list[dict]:
+        """Build one or more text-like blocks with byte-safe chunking.
+
+        Args:
+            block_type: Feishu block type.
+            field_name: Text payload field name.
+            text: Block text content.
+            parse_inline: Whether to parse markdown inline style.
+        """
+
+        chunks = self._split_text_for_native_block(
+            text = text,
+            max_bytes = self.NATIVE_TEXT_BLOCK_MAX_BYTES
+        )
+        return [
+            self._build_textual_block_payload(
+                block_type = block_type,
+                field_name = field_name,
+                text = chunk,
+                parse_inline = parse_inline
+            )
+            for chunk in chunks
+            if chunk is not None
+        ]
+
+    def _split_text_for_native_block(self, text: str, max_bytes: int) -> list[str]:
+        """Split one text body into API-safe chunks by UTF-8 bytes.
+
+        Args:
+            text: Raw text content.
+            max_bytes: Maximum bytes per chunk.
+        """
+
+        if max_bytes <= 0:
+            return [text]
+
+        if len(text.encode("utf-8")) <= max_bytes:
+            return [text]
+
+        if "\n" in text:
+            by_lines = split_markdown_by_lines(
+                content = text,
+                max_bytes = max_bytes
+            )
+        else:
+            by_lines = [text]
+
+        chunks: list[str] = []
+        for item in by_lines:
+            if len(item.encode("utf-8")) <= max_bytes:
+                chunks.append(item)
+                continue
+            chunks.extend(chunk_text_by_bytes(text = item, max_bytes = max_bytes))
+
+        if not chunks:
+            return [text]
+        return chunks
+
+    def _build_textual_block_payload(
+        self,
+        block_type: int,
+        field_name: str,
+        text: str,
+        parse_inline: bool
+    ) -> dict:
+        """Build one text-like block payload.
+
+        Args:
+            block_type: Feishu block type.
+            field_name: Text payload field name.
+            text: Block text content.
+            parse_inline: Whether to parse markdown inline style.
+        """
+
+        if parse_inline:
+            elements = self._build_text_elements_from_markdown(text = text)
+        else:
+            elements = [{"text_run": {"content": text}}]
+
+        if not elements:
+            elements = [{"text_run": {"content": ""}}]
+
+        return {
+            "block_type": block_type,
+            field_name: {
+                "elements": elements
+            }
+        }
+
+    def _build_text_elements_from_markdown(self, text: str) -> list[dict]:
+        """Build Feishu text elements from lightweight markdown inline tokens.
+
+        Args:
+            text: Inline markdown text.
+        """
+
+        if not text:
+            return [{"text_run": {"content": ""}}]
+
+        elements: list[dict] = []
+        cursor = 0
+        for match in self.INLINE_MARKDOWN_PATTERN.finditer(text):
+            start, end = match.span()
+            if start > cursor:
+                plain_text = text[cursor:start]
+                if plain_text:
+                    elements.append({"text_run": {"content": plain_text}})
+
+            if match.group("link_text") is not None:
+                elements.append(
+                    {
+                        "text_run": {
+                            "content": match.group("link_text"),
+                            "text_element_style": {
+                                "link": {
+                                    "url": match.group("link_url")
+                                }
+                            }
+                        }
+                    }
+                )
+            elif match.group("bold") is not None:
+                elements.append(self._build_styled_text_run(
+                    content = match.group("bold"),
+                    style = {"bold": True}
+                ))
+            elif match.group("bold_underline") is not None:
+                elements.append(self._build_styled_text_run(
+                    content = match.group("bold_underline"),
+                    style = {"bold": True}
+                ))
+            elif match.group("inline_code") is not None:
+                elements.append(self._build_styled_text_run(
+                    content = match.group("inline_code"),
+                    style = {"inline_code": True}
+                ))
+            elif match.group("strike") is not None:
+                elements.append(self._build_styled_text_run(
+                    content = match.group("strike"),
+                    style = {"strikethrough": True}
+                ))
+            elif match.group("italic") is not None:
+                elements.append(self._build_styled_text_run(
+                    content = match.group("italic"),
+                    style = {"italic": True}
+                ))
+            elif match.group("italic_underscore") is not None:
+                elements.append(self._build_styled_text_run(
+                    content = match.group("italic_underscore"),
+                    style = {"italic": True}
+                ))
+
+            cursor = end
+
+        if cursor < len(text):
+            tail = text[cursor:]
+            if tail:
+                elements.append({"text_run": {"content": tail}})
+
+        return elements
+
+    def _build_styled_text_run(self, content: str, style: dict) -> dict:
+        """Build one text_run element with style.
+
+        Args:
+            content: Text content.
+            style: Text style payload.
+        """
+
+        return {
+            "text_run": {
+                "content": content,
+                "text_element_style": style
+            }
+        }
+
+    def _append_native_blocks(self, document_id: str, blocks: list[dict]) -> None:
+        """Append native blocks to one document in small batches.
+
+        Args:
+            document_id: Feishu document id.
+            blocks: Block payload list.
+        """
+
+        if not blocks:
+            return
+
+        for index in range(0, len(blocks), self.CREATE_CHILDREN_BATCH_SIZE):
+            batch = blocks[index:index + self.CREATE_CHILDREN_BATCH_SIZE]
+            self._request_json(
+                method = "POST",
+                path = f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
+                json_body = {
+                    "children": batch,
+                    "index": -1
+                }
+            )
 
     def replace_image(self, document_id: str, block_id: str, file_token: str) -> None:
         """Replace one image block content by uploaded file token.
@@ -1150,7 +1727,7 @@ class DocWriterService(FeishuServiceBase):
             json_body = {
                 "children": [
                     {
-                        "block_type": 2,
+                        "block_type": self.BLOCK_TYPE_TEXT,
                         "text": {
                             "elements": [
                                 {

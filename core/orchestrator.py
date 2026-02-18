@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import urllib.parse
+import datetime
 
 from typing import Optional
 
@@ -71,6 +72,8 @@ class ImportOrchestrator:
         notify_level: str,
         write_mode: str,
         folder_subdirs: bool = False,
+        folder_root_subdir: bool = True,
+        folder_root_subdir_name: str = "",
         structure_order: str = "toc_first",
         toc_file: str = "TABLE_OF_CONTENTS.md",
         folder_nav_doc: bool = True,
@@ -88,6 +91,8 @@ class ImportOrchestrator:
             notify_level: Notification verbosity level.
             write_mode: Write mode, one of folder/wiki/both.
             folder_subdirs: Whether to auto-create folder hierarchy in folder mode.
+            folder_root_subdir: Whether to create one task root subfolder first.
+            folder_root_subdir_name: Optional task root subfolder name.
             structure_order: Ordering strategy, one of toc_first/path.
             toc_file: TOC markdown path relative to source root.
             folder_nav_doc: Whether to write folder navigation document.
@@ -123,6 +128,13 @@ class ImportOrchestrator:
             manifest.llm_calls,
             manifest.fallback_count
         )
+        self._log_robot_push(
+            stage = "start",
+            detail = (
+                f"source_files = {len(paths)}, planned_files = {len(manifest.items)}, "
+                f"mode = {write_mode}, strategy = {structure_order}"
+            )
+        )
         if manifest.unresolved_links:
             logger.warning("unresolved toc links: %d", len(manifest.unresolved_links))
             for unresolved in manifest.unresolved_links[:20]:
@@ -151,6 +163,30 @@ class ImportOrchestrator:
             space_id = "dry-run"
 
         created_docs: list[CreatedDocRecord] = []
+        folder_root_token = ""
+        folder_root_relative_dir = ""
+        if (
+            not dry_run
+            and write_mode in {"folder", "both"}
+            and folder_root_subdir
+        ):
+            folder_root_relative_dir = self._resolve_folder_root_subdir_name(
+                explicit_name = folder_root_subdir_name
+            )
+            folder_root_token = self.doc_writer.ensure_folder_path(
+                relative_dir = folder_root_relative_dir
+            )
+            self._log_robot_push(
+                stage = "folder_root_ready",
+                detail = (
+                    f"name = {folder_root_relative_dir}, folder_token = {folder_root_token}"
+                )
+            )
+            logger.info(
+                "folder root ready: name = %s, token = %s",
+                folder_root_relative_dir,
+                folder_root_token
+            )
 
         for index, plan_item in enumerate(manifest.items, start = 1):
             path = plan_item.path
@@ -173,15 +209,27 @@ class ImportOrchestrator:
                     message = f"正在写入：{doc.path} ({index}/{len(manifest.items)})",
                     force = notify_level == "normal"
                 )
+                self._log_robot_push(
+                    stage = "processing",
+                    detail = f"path = {doc.path}, progress = {index}/{len(manifest.items)}"
+                )
 
                 if dry_run:
                     result.success += 1
                     continue
 
-                target_folder_token = ""
-                if folder_subdirs and write_mode in {"folder", "both"}:
+                target_folder_token = folder_root_token
+                if write_mode in {"folder", "both"} and folder_subdirs:
+                    effective_relative_dir = doc.relative_dir
+                    if folder_root_relative_dir:
+                        if effective_relative_dir:
+                            effective_relative_dir = (
+                                f"{folder_root_relative_dir}/{effective_relative_dir}"
+                            )
+                        else:
+                            effective_relative_dir = folder_root_relative_dir
                     target_folder_token = self.doc_writer.ensure_folder_path(
-                        relative_dir = doc.relative_dir
+                        relative_dir = effective_relative_dir
                     )
 
                 document_id, resolved_title, doc_url = self._create_doc_with_title_strategy(
@@ -194,6 +242,13 @@ class ImportOrchestrator:
                     resolved_title,
                     target_folder_token or getattr(self.doc_writer, "folder_token", ""),
                     doc_url
+                )
+                self._log_robot_push(
+                    stage = "doc_created",
+                    detail = (
+                        f"path = {doc.path}, title = {resolved_title}, document_id = {document_id}, "
+                        f"folder_token = {target_folder_token or getattr(self.doc_writer, 'folder_token', '')}"
+                    )
                 )
                 asset_lookup = self._build_asset_lookup(assets = doc.assets)
 
@@ -238,6 +293,13 @@ class ImportOrchestrator:
                         parent_node_token = parent_node_token,
                         title = resolved_title
                     )
+                    self._log_robot_push(
+                        stage = "wiki_moved",
+                        detail = (
+                            f"path = {doc.path}, document_id = {document_id}, "
+                            f"wiki_node_token = {wiki_node_token}"
+                        )
+                    )
 
                 created_docs.append(
                     CreatedDocRecord(
@@ -258,6 +320,10 @@ class ImportOrchestrator:
                 )
             except Exception as exc:
                 logger.exception("Failed to process %s", path)
+                self._log_robot_push(
+                    stage = "failed",
+                    detail = f"path = {path}, error = {str(exc)[:240]}"
+                )
                 result.failures.append(
                     ImportFailure(
                         path = path,
@@ -282,7 +348,8 @@ class ImportOrchestrator:
             self._write_folder_navigation_doc(
                 folder_nav_title = folder_nav_title,
                 manifest = manifest,
-                created_docs = created_docs
+                created_docs = created_docs,
+                folder_token = folder_root_token
             )
 
         logger.info("*" * 50)
@@ -293,6 +360,13 @@ class ImportOrchestrator:
             result.failed
         )
         logger.info("*" * 50)
+        self._log_robot_push(
+            stage = "finished",
+            detail = (
+                f"total = {result.total}, success = {result.success}, failed = {result.failed}, "
+                f"llm_calls = {manifest.llm_calls}, unresolved = {len(manifest.unresolved_links)}"
+            )
+        )
 
         summary_lines = [
             "知识导入任务完成",
@@ -373,11 +447,60 @@ class ImportOrchestrator:
             ]
         return manifest
 
+    def _resolve_folder_root_subdir_name(self, explicit_name: str) -> str:
+        """Resolve task root folder name for one import run.
+
+        Args:
+            explicit_name: Optional CLI-provided folder name.
+        """
+
+        normalized_explicit = self._normalize_doc_title(title = explicit_name)
+        if normalized_explicit:
+            return normalized_explicit
+
+        source_name = self._detect_source_name_for_folder_root()
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        return self._normalize_doc_title(title = f"{source_name}-{timestamp}") or f"import-{timestamp}"
+
+    def _detect_source_name_for_folder_root(self) -> str:
+        """Build source label used by task root folder auto naming.
+
+        Args:
+            self: Orchestrator instance.
+        """
+
+        if hasattr(self.source_adapter, "root_path"):
+            root_path = str(getattr(self.source_adapter, "root_path", "")).strip()
+            name = os.path.basename(root_path.rstrip("/")) if root_path else ""
+            if name:
+                return name
+
+        if hasattr(self.source_adapter, "subdir"):
+            subdir = str(getattr(self.source_adapter, "subdir", "")).strip().strip("/")
+            if subdir:
+                return subdir.split("/")[-1]
+
+        if hasattr(self.source_adapter, "repo"):
+            repo = str(getattr(self.source_adapter, "repo", "")).strip()
+            if repo:
+                parsed = urllib.parse.urlparse(repo)
+                if parsed.path:
+                    repo_path = parsed.path.rstrip("/").split("/")[-1]
+                else:
+                    repo_path = repo.rstrip("/").split("/")[-1]
+                if repo_path.endswith(".git"):
+                    repo_path = repo_path[:-4]
+                if repo_path:
+                    return repo_path
+
+        return "import"
+
     def _write_folder_navigation_doc(
         self,
         folder_nav_title: str,
         manifest: ImportManifest,
-        created_docs: list[CreatedDocRecord]
+        created_docs: list[CreatedDocRecord],
+        folder_token: str = ""
     ) -> None:
         """Create one folder navigation doc linking all imported markdown docs.
 
@@ -385,6 +508,7 @@ class ImportOrchestrator:
             folder_nav_title: Navigation document title.
             manifest: Import manifest.
             created_docs: Created document records.
+            folder_token: Optional destination folder token.
         """
 
         record_by_path = {item.path: item for item in created_docs}
@@ -398,7 +522,7 @@ class ImportOrchestrator:
         try:
             nav_create = self._create_doc_with_meta(
                 title = self._normalize_doc_title(title = folder_nav_title) or "00-导航总目录",
-                folder_token = ""
+                folder_token = folder_token
             )
             self.doc_writer.write_markdown_with_fallback(
                 document_id = nav_create["document_id"],
@@ -409,8 +533,19 @@ class ImportOrchestrator:
                 nav_create["document_id"],
                 folder_nav_title
             )
+            self._log_robot_push(
+                stage = "folder_nav_created",
+                detail = (
+                    f"title = {folder_nav_title}, document_id = {nav_create['document_id']}, "
+                    f"entries = {len(created_docs)}"
+                )
+            )
         except Exception:
             logger.exception("Failed to create folder navigation document")
+            self._log_robot_push(
+                stage = "folder_nav_failed",
+                detail = f"title = {folder_nav_title}"
+            )
 
     def _build_folder_nav_markdown(
         self,
@@ -689,7 +824,7 @@ class ImportOrchestrator:
 
         filename = os.path.basename(path or "")
         stem = os.path.splitext(filename)[0].lower()
-        return stem in {"readme", "index"}
+        return stem in {"readme", "index", "table_of_contents", "toc"}
 
     def _looks_like_invalid_param_error(self, exc: Exception) -> bool:
         """Check whether exception looks like Feishu invalid parameter error.
@@ -744,3 +879,13 @@ class ImportOrchestrator:
             self.notify_service.send_status(chat_id = chat_id, message = message)
         except Exception:
             logger.exception("Failed to send notify message")
+
+    def _log_robot_push(self, stage: str, detail: str) -> None:
+        """Write structured robot push logs for delivery traceability.
+
+        Args:
+            stage: Robot delivery stage.
+            detail: Stage detail text.
+        """
+
+        logger.info("robot_push | stage = %s | %s", stage, detail)

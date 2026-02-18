@@ -91,6 +91,17 @@ def parse_args() -> argparse.Namespace:
         help = "When write-mode includes folder, auto-create subfolders by source directories"
     )
     parser.add_argument(
+        "--folder-root-subdir",
+        action = argparse.BooleanOptionalAction,
+        default = True,
+        help = "When write-mode includes folder, create one task root subfolder first"
+    )
+    parser.add_argument(
+        "--folder-root-subdir-name",
+        default = "",
+        help = "Optional task root subfolder name; auto-generated when empty"
+    )
+    parser.add_argument(
         "--structure-order",
         choices = ["toc_first", "path"],
         default = "toc_first",
@@ -169,6 +180,10 @@ def main() -> int:
         raise ValueError("--space-name or --space-id is required when --write-mode is wiki or both")
     if args.folder_subdirs and args.write_mode not in {"folder", "both"}:
         logger.warning("--folder-subdirs only applies when --write-mode is folder or both")
+    if args.folder_root_subdir and args.write_mode not in {"folder", "both"}:
+        logger.warning("--folder-root-subdir only applies when --write-mode is folder or both")
+    if args.folder_root_subdir_name and not args.folder_root_subdir:
+        logger.warning("--folder-root-subdir-name is ignored when --no-folder-root-subdir")
 
     if args.max_workers > 1:
         logger.warning("max_workers > 1 is reserved in v1; running sequentially")
@@ -340,6 +355,8 @@ def main() -> int:
         notify_level = args.notify_level,
         write_mode = args.write_mode,
         folder_subdirs = args.folder_subdirs,
+        folder_root_subdir = args.folder_root_subdir,
+        folder_root_subdir_name = args.folder_root_subdir_name,
         structure_order = args.structure_order,
         toc_file = args.toc_file,
         folder_nav_doc = args.folder_nav_doc,

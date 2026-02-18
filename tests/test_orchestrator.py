@@ -56,6 +56,7 @@ class FakeDocWriter:
 
     def __init__(self) -> None:
         self.created = []
+        self.ensure_calls = []
 
     def create_doc(self, title: str, folder_token: str = "") -> str:
         """Return deterministic document id.
@@ -69,14 +70,16 @@ class FakeDocWriter:
         self.created.append((title, folder_token))
         return f"doc_{title}"
 
-    def ensure_folder_path(self, relative_dir: str) -> str:
+    def ensure_folder_path(self, relative_dir: str, root_folder_token: str = "") -> str:
         """Return deterministic folder token for hierarchy mode.
 
         Args:
             self: Fake writer.
             relative_dir: Relative directory.
+            root_folder_token: Optional root folder token override.
         """
 
+        self.ensure_calls.append(relative_dir)
         if not relative_dir:
             return "root_folder"
         return f"folder_{relative_dir.replace('/', '_')}"
@@ -262,6 +265,7 @@ class RecordingDocWriter(FakeDocWriter):
     """Fake writer recording create_doc title calls."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.created_titles = []
 
     def create_doc(self, title: str, folder_token: str = "") -> str:
@@ -281,6 +285,7 @@ class RetryOnceInvalidParamDocWriter(FakeDocWriter):
     """Fake writer failing once with invalid parameter message."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.created_titles = []
 
     def create_doc(self, title: str, folder_token: str = "") -> str:
@@ -299,6 +304,110 @@ class RetryOnceInvalidParamDocWriter(FakeDocWriter):
                 "code = 1770001, msg = 请确认参数是否合法"
             )
         return "doc_retry_ok"
+
+
+class OrderedSource:
+    """Fake source adapter exposing unsorted markdown paths."""
+
+    def __init__(self) -> None:
+        self.docs = {
+            "b/ch2.md": SourceDocument(
+                path = "b/ch2.md",
+                title = "Chapter 2",
+                markdown = "# Chapter 2",
+                assets = [],
+                relative_dir = "b",
+                base_ref = "/tmp",
+                source_type = "local"
+            ),
+            "a/ch1.md": SourceDocument(
+                path = "a/ch1.md",
+                title = "Chapter 1",
+                markdown = "# Chapter 1",
+                assets = [],
+                relative_dir = "a",
+                base_ref = "/tmp",
+                source_type = "local"
+            )
+        }
+
+    def list_markdown(self):
+        """Return intentionally unsorted markdown paths.
+
+        Args:
+            self: Fake source instance.
+        """
+
+        return ["b/ch2.md", "a/ch1.md"]
+
+    def read_markdown(self, relative_path: str):
+        """Return markdown by relative path.
+
+        Args:
+            self: Fake source instance.
+            relative_path: Relative markdown path.
+        """
+
+        return self.docs[relative_path]
+
+
+class NavDocWriter(FakeDocWriter):
+    """Fake writer recording created docs and nav markdown payload."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.created_titles = []
+        self.created_meta = []
+        self.nav_markdown = ""
+        self._doc_index = 0
+
+    def create_doc_with_meta(self, title: str, folder_token: str = "") -> dict[str, str]:
+        """Return deterministic metadata with partial URL coverage.
+
+        Args:
+            self: Fake writer.
+            title: Document title.
+            folder_token: Optional destination folder token.
+        """
+
+        self.created_titles.append(title)
+        self.created_meta.append((title, folder_token))
+        if title == "00-导航总目录":
+            return {
+                "document_id": "doc_nav",
+                "url": "https://example.com/doc_nav"
+            }
+
+        self._doc_index += 1
+        if self._doc_index == 1:
+            return {
+                "document_id": "doc_ch1",
+                "url": "https://example.com/doc_ch1"
+            }
+        return {
+            "document_id": "doc_ch2",
+            "url": ""
+        }
+
+    def write_markdown_with_fallback(
+        self,
+        document_id: str,
+        content: str,
+        image_token_map = None,
+        image_block_handler = None
+    ) -> None:
+        """Record nav markdown while keeping normal write behavior.
+
+        Args:
+            self: Fake writer.
+            document_id: Document id.
+            content: Markdown content.
+            image_token_map: Unused.
+            image_block_handler: Unused.
+        """
+
+        if document_id == "doc_nav":
+            self.nav_markdown = content
 
 
 class TestImportOrchestrator(unittest.TestCase):
@@ -408,6 +517,7 @@ class TestImportOrchestrator(unittest.TestCase):
             notify_level = "none",
             write_mode = "folder",
             folder_subdirs = True,
+            folder_root_subdir = False,
             folder_nav_doc = False
         )
 
@@ -415,6 +525,133 @@ class TestImportOrchestrator(unittest.TestCase):
         self.assertEqual(result.failed, 0)
         self.assertEqual(len(writer.created), 1)
         self.assertEqual(writer.created[0][1], "folder_part-a")
+
+    def test_folder_root_subdir_with_subdirs(self) -> None:
+        """Folder root subdir should prefix directory hierarchy when enabled.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = FakeDocWriter()
+        doc = SourceDocument(
+            path = "part-a/chapter-1.md",
+            title = "chapter-1",
+            markdown = "# chapter-1",
+            assets = [],
+            relative_dir = "part-a",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_subdirs = True,
+            folder_root_subdir = True,
+            folder_root_subdir_name = "batch_001",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(writer.created[0][1], "folder_batch_001_part-a")
+        self.assertEqual(
+            writer.ensure_calls,
+            ["batch_001", "batch_001/part-a"]
+        )
+
+    def test_folder_root_subdir_without_subdirs(self) -> None:
+        """Folder root subdir should hold all docs when subdirs are disabled.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = FakeDocWriter()
+        doc = SourceDocument(
+            path = "chapter-1.md",
+            title = "chapter-1",
+            markdown = "# chapter-1",
+            assets = [],
+            relative_dir = "",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_subdirs = False,
+            folder_root_subdir = True,
+            folder_root_subdir_name = "batch_002",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(writer.created[0][1], "folder_batch_002")
+        self.assertEqual(writer.ensure_calls, ["batch_002"])
 
     def test_directory_index_title_mode_uses_folder_name(self) -> None:
         """Directory index markdown should prefer folder-name title.
@@ -591,6 +828,110 @@ class TestImportOrchestrator(unittest.TestCase):
         self.assertEqual(result.success, 1)
         self.assertEqual(result.failed, 0)
         self.assertEqual(writer.created_titles, ["《AI Agent 架构：从单体到企业级多智能体》", "README"])
+
+    def test_both_mode_respects_path_order_manifest(self) -> None:
+        """Write-mode both should follow planned order before writing docs.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = RecordingDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = FakeWiki(),
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "demo",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "both",
+            structure_order = "path",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 2)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(
+            writer.created_titles,
+            ["Chapter 1", "Chapter 2"]
+        )
+
+    def test_folder_navigation_doc_contains_link_or_doc_id(self) -> None:
+        """Folder navigation doc should prefer URL and fallback to document_id.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = NavDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            structure_order = "path",
+            folder_nav_doc = True
+        )
+
+        self.assertEqual(result.success, 2)
+        self.assertEqual(result.failed, 0)
+        self.assertIn("[Chapter 1](https://example.com/doc_ch1)", writer.nav_markdown)
+        self.assertIn("document_id: `doc_ch2`", writer.nav_markdown)
 
 
 if __name__ == "__main__":
