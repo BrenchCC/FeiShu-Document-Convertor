@@ -1,0 +1,597 @@
+import unittest
+
+from config.config import AppConfig
+from data.models import SourceDocument
+from core.orchestrator import ImportOrchestrator
+from utils.markdown_processor import MarkdownProcessor
+
+
+class FakeSource:
+    """Fake source adapter for orchestrator tests."""
+
+    def __init__(self) -> None:
+        self.docs = {
+            "ok.md": SourceDocument(
+                path = "ok.md",
+                title = "ok",
+                markdown = "# ok\n![a](./a.png)",
+                assets = [],
+                relative_dir = "",
+                base_ref = "/tmp",
+                source_type = "local"
+            ),
+            "bad.md": SourceDocument(
+                path = "bad.md",
+                title = "bad",
+                markdown = "# bad",
+                assets = [],
+                relative_dir = "",
+                base_ref = "/tmp",
+                source_type = "local"
+            )
+        }
+
+    def list_markdown(self):
+        """List fake markdown files.
+
+        Args:
+            self: Fake source instance.
+        """
+
+        return ["ok.md", "bad.md"]
+
+    def read_markdown(self, relative_path: str):
+        """Return fake doc by path.
+
+        Args:
+            self: Fake source instance.
+            relative_path: Relative markdown path.
+        """
+
+        return self.docs[relative_path]
+
+
+class FakeDocWriter:
+    """Fake document writer service."""
+
+    def __init__(self) -> None:
+        self.created = []
+
+    def create_doc(self, title: str, folder_token: str = "") -> str:
+        """Return deterministic document id.
+
+        Args:
+            self: Fake writer.
+            title: Document title.
+            folder_token: Optional destination folder token.
+        """
+
+        self.created.append((title, folder_token))
+        return f"doc_{title}"
+
+    def ensure_folder_path(self, relative_dir: str) -> str:
+        """Return deterministic folder token for hierarchy mode.
+
+        Args:
+            self: Fake writer.
+            relative_dir: Relative directory.
+        """
+
+        if not relative_dir:
+            return "root_folder"
+        return f"folder_{relative_dir.replace('/', '_')}"
+
+    def convert_markdown(
+        self,
+        document_id: str,
+        content: str,
+        image_token_map = None,
+        image_block_handler = None
+    ) -> None:
+        """Raise for bad document to test fallback flow.
+
+        Args:
+            self: Fake writer.
+            document_id: Document id.
+            content: Markdown content.
+            image_token_map: Image token map.
+            image_block_handler: Image handler callback.
+        """
+
+        if document_id == "doc_bad":
+            raise RuntimeError("convert failed")
+
+    def append_fallback_text(self, document_id: str, content: str) -> None:
+        """Fallback no-op.
+
+        Args:
+            self: Fake writer.
+            document_id: Document id.
+            content: Markdown content.
+        """
+
+    def replace_image(self, document_id: str, block_id: str, file_token: str) -> None:
+        """Replace image no-op.
+
+        Args:
+            self: Fake writer.
+            document_id: Document id.
+            block_id: Image block id.
+            file_token: Uploaded file token.
+        """
+
+    def write_markdown_with_fallback(
+        self,
+        document_id: str,
+        content: str,
+        image_token_map = None,
+        image_block_handler = None
+    ) -> None:
+        """Write markdown with fallback simulation.
+
+        Args:
+            self: Fake writer.
+            document_id: Document id.
+            content: Markdown content.
+            image_token_map: Image token map.
+            image_block_handler: Image handler callback.
+        """
+
+        try:
+            self.convert_markdown(
+                document_id = document_id,
+                content = content,
+                image_token_map = image_token_map,
+                image_block_handler = image_block_handler
+            )
+        except Exception:
+            self.append_fallback_text(document_id = document_id, content = content)
+
+
+class FakeMedia:
+    """Fake media uploader service."""
+
+    def upload_to_doc(self, asset, document_id: str) -> str:
+        """Always return one token.
+
+        Args:
+            self: Fake media.
+            asset: Asset reference.
+            document_id: Document id.
+        """
+
+        return "token123"
+
+    def upload_to_node(self, asset, parent_node: str) -> str:
+        """Always return one token.
+
+        Args:
+            self: Fake media.
+            asset: Asset reference.
+            parent_node: Destination node token.
+        """
+
+        return "token123"
+
+
+class FakeWiki:
+    """Fake wiki service."""
+
+    def get_or_create_space(self, space_name: str) -> str:
+        """Return fixed space id.
+
+        Args:
+            self: Fake wiki.
+            space_name: Space name.
+        """
+
+        return "space1"
+
+    def ensure_path_nodes(self, space_id: str, relative_dir: str) -> str:
+        """Return root token.
+
+        Args:
+            self: Fake wiki.
+            space_id: Space id.
+            relative_dir: Relative directory.
+        """
+
+        return ""
+
+    def move_doc_to_wiki(self, space_id: str, document_id: str, parent_node_token: str, title: str) -> str:
+        """Raise for bad doc to verify continue-on-failure.
+
+        Args:
+            self: Fake wiki.
+            space_id: Space id.
+            document_id: Document id.
+            parent_node_token: Parent token.
+            title: Node title.
+        """
+
+        if document_id == "doc_bad":
+            raise RuntimeError("wiki move failed")
+        return "node1"
+
+
+class FakeNotify:
+    """Fake notify service."""
+
+    def __init__(self) -> None:
+        self.messages = []
+
+    def send_status(self, chat_id: str, message: str) -> None:
+        """Collect status messages.
+
+        Args:
+            self: Fake notify.
+            chat_id: Chat id.
+            message: Message text.
+        """
+
+        self.messages.append((chat_id, message))
+
+
+class SingleDocSource:
+    """Fake source adapter exposing one markdown file."""
+
+    def __init__(self, doc: SourceDocument) -> None:
+        self.doc = doc
+
+    def list_markdown(self):
+        """List one markdown file.
+
+        Args:
+            self: Fake source instance.
+        """
+
+        return [self.doc.path]
+
+    def read_markdown(self, relative_path: str):
+        """Return the same markdown file.
+
+        Args:
+            self: Fake source instance.
+            relative_path: Relative markdown path.
+        """
+
+        return self.doc
+
+
+class RecordingDocWriter(FakeDocWriter):
+    """Fake writer recording create_doc title calls."""
+
+    def __init__(self) -> None:
+        self.created_titles = []
+
+    def create_doc(self, title: str, folder_token: str = "") -> str:
+        """Record title and return deterministic doc id.
+
+        Args:
+            self: Fake writer.
+            title: Document title.
+            folder_token: Optional destination folder token.
+        """
+
+        self.created_titles.append(title)
+        return f"doc_{len(self.created_titles)}"
+
+
+class RetryOnceInvalidParamDocWriter(FakeDocWriter):
+    """Fake writer failing once with invalid parameter message."""
+
+    def __init__(self) -> None:
+        self.created_titles = []
+
+    def create_doc(self, title: str, folder_token: str = "") -> str:
+        """Fail first call and succeed on second call.
+
+        Args:
+            self: Fake writer.
+            title: Document title.
+            folder_token: Optional destination folder token.
+        """
+
+        self.created_titles.append(title)
+        if len(self.created_titles) == 1:
+            raise RuntimeError(
+                "Feishu API failed for /open-apis/docx/v1/documents: "
+                "code = 1770001, msg = 请确认参数是否合法"
+            )
+        return "doc_retry_ok"
+
+
+class TestImportOrchestrator(unittest.TestCase):
+    """Tests for import orchestrator behavior."""
+
+    def test_continue_on_failure(self) -> None:
+        """Should continue task when one file fails.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "https://example.com/webhook",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "normal"
+        )
+
+        notify = FakeNotify()
+        orchestrator = ImportOrchestrator(
+            source_adapter = FakeSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = FakeDocWriter(),
+            media_service = FakeMedia(),
+            wiki_service = FakeWiki(),
+            notify_service = notify
+        )
+
+        result = orchestrator.run(
+            space_name = "demo",
+            space_id = "",
+            chat_id = "chat1",
+            dry_run = False,
+            notify_level = "normal",
+            write_mode = "both",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.total, 2)
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.failures[0].path, "bad.md")
+        self.assertTrue(len(notify.messages) >= 2)
+
+    def test_folder_subdirs_create_docs_in_relative_folders(self) -> None:
+        """Folder hierarchy mode should route docs into created subfolders.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = FakeDocWriter()
+        doc = SourceDocument(
+            path = "part-a/chapter-1.md",
+            title = "chapter-1",
+            markdown = "# chapter-1",
+            assets = [],
+            relative_dir = "part-a",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_subdirs = True,
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(len(writer.created), 1)
+        self.assertEqual(writer.created[0][1], "folder_part-a")
+
+    def test_directory_index_title_mode_uses_folder_name(self) -> None:
+        """Directory index markdown should prefer folder-name title.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        doc = SourceDocument(
+            path = "Part7-生产架构/README.md",
+            title = "《AI Agent 架构：从单体到企业级多智能体》",
+            markdown = "# overview",
+            assets = [],
+            relative_dir = "Part7-生产架构",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        writer = RecordingDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(writer.created_titles[0], "Part7-生产架构")
+
+    def test_retry_create_doc_with_path_based_title_on_invalid_param(self) -> None:
+        """Title fallback should retry with path-based title when invalid.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        doc = SourceDocument(
+            path = "Part2-工具与扩展/第03章：工具调用基础.md",
+            title = "第 3 章：工具调用基础",
+            markdown = "# chapter",
+            assets = [],
+            relative_dir = "Part2-工具与扩展",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        writer = RetryOnceInvalidParamDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(len(writer.created_titles), 2)
+        self.assertEqual(writer.created_titles[0], "第 3 章：工具调用基础")
+        self.assertEqual(writer.created_titles[1], "Part2-工具与扩展 - 第03章：工具调用基础")
+
+    def test_root_readme_can_retry_with_filename_title(self) -> None:
+        """Root README should fallback to filename when heading title is invalid.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        doc = SourceDocument(
+            path = "README.md",
+            title = "《AI Agent 架构：从单体到企业级多智能体》",
+            markdown = "# root",
+            assets = [],
+            relative_dir = "",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        writer = RetryOnceInvalidParamDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(writer.created_titles, ["《AI Agent 架构：从单体到企业级多智能体》", "README"])
+
+
+if __name__ == "__main__":
+    unittest.main()
