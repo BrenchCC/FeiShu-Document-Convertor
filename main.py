@@ -210,9 +210,13 @@ def parse_args() -> argparse.Namespace:
         action = argparse.BooleanOptionalAction,
         default = False,
         help = (
-            "When write-mode includes folder, auto-create subfolders by source directories "
-            "(root README/readme/index is filtered; subdir README kept)"
+            "When write-mode includes folder, auto-create subfolders by source directories"
         )
+    )
+    parser.add_argument(
+        "--skip-root-readme",
+        action = "store_true",
+        help = "Skip only root README.md/readme.md when planning document manifest"
     )
     parser.add_argument(
         "--folder-root-subdir",
@@ -507,6 +511,7 @@ def main() -> int:
         folder_nav_title = args.folder_nav_title,
         llm_fallback = args.llm_fallback,
         llm_max_calls = args.llm_max_calls,
+        skip_root_readme = args.skip_root_readme,
         max_workers = args.max_workers,
         chunk_workers = args.chunk_workers
     )
@@ -578,6 +583,38 @@ def _validate_runtime_credentials(args: argparse.Namespace, config: AppConfig) -
         raise ValueError(
             "FEISHU_FOLDER_TOKEN is required when --write-mode is folder or both"
         )
+    if args.write_mode in {"folder", "both"} and _is_placeholder_folder_token(
+        token = config.feishu_folder_token
+    ):
+        raise ValueError(
+            "FEISHU_FOLDER_TOKEN looks like a placeholder value. "
+            "Please set a real Feishu folder token before folder import."
+        )
+
+
+def _is_placeholder_folder_token(token: str) -> bool:
+    """Check whether one folder token looks like placeholder test value.
+
+    Args:
+        token: Folder token text.
+    """
+
+    normalized = (token or "").strip().lower()
+    if not normalized:
+        return False
+
+    placeholders = {
+        "test_folder_token",
+        "your_folder_token",
+        "example_folder_token",
+        "folder_token",
+        "<folder_token>"
+    }
+    if normalized in placeholders:
+        return True
+    if normalized.startswith("${") and normalized.endswith("}"):
+        return True
+    return False
 
 
 if __name__ == "__main__":

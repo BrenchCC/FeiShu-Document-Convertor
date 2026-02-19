@@ -71,17 +71,19 @@ class OrchestrationPlanner:
 
     MD_LINK_PATTERN = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
     INDEX_STEMS = {"readme", "index", "table_of_contents", "toc"}
-    ROOT_FILTER_STEMS = {"readme", "index"}
+    ROOT_FILTER_STEMS = {"readme"}
 
     def __init__(
         self,
         source_adapter: SourceAdapter,
         llm_resolver: Optional[TocAmbiguityResolver] = None,
-        llm_confidence_threshold: float = 0.6
+        llm_confidence_threshold: float = 0.6,
+        skip_root_readme: bool = False
     ) -> None:
         self.source_adapter = source_adapter
         self.llm_resolver = llm_resolver
         self.llm_confidence_threshold = llm_confidence_threshold
+        self.skip_root_readme = skip_root_readme
 
     def build_manifest(
         self,
@@ -114,7 +116,7 @@ class OrchestrationPlanner:
         filtered_root_paths: list[str] = []
         effective_paths: list[str] = []
         for path in normalized_paths:
-            if self._is_root_filtered_path(path = path):
+            if self._is_root_readme_skipped(path = path):
                 filtered_root_paths.append(path)
                 skipped_items.append(
                     ImportSkipped(
@@ -513,12 +515,15 @@ class OrchestrationPlanner:
             return ""
         return normalized
 
-    def _is_root_filtered_path(self, path: str) -> bool:
-        """Check whether source path should be filtered by root README/index rule.
+    def _is_root_readme_skipped(self, path: str) -> bool:
+        """Check whether source path should be skipped by root README rule.
 
         Args:
             path: Normalized source-relative path.
         """
+
+        if not self.skip_root_readme:
+            return False
 
         normalized = (path or "").strip().replace("\\", "/").strip("/")
         if "/" in normalized:

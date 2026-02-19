@@ -57,6 +57,7 @@ class FakeHttpClient:
         self.calls = []
         self.fail_once_invalid_token = False
         self.fail_once_folder_contention = False
+        self.fail_folder_params_for_token = ""
         self.fail_convert = False
         self.fail_once_schema_mismatch_children = False
         self.fail_once_schema_mismatch_descendant = False
@@ -215,6 +216,16 @@ class FakeHttpClient:
         if url.endswith("/open-apis/drive/v1/files") and kwargs.get("method") == "GET":
             params = kwargs.get("params", {}) or {}
             folder_token = params.get("folder_token", "")
+            if self.fail_folder_params_for_token and folder_token == self.fail_folder_params_for_token:
+                return FakeResponse(
+                    {
+                        "code": 1061002,
+                        "msg": "params error.",
+                        "error": {
+                            "log_id": "test_log_id"
+                        }
+                    }
+                )
             files = self.folder_children.get(folder_token, [])
             return FakeResponse(
                 {
@@ -708,6 +719,29 @@ class TestFeishuApiOptimizations(unittest.TestCase):
         sent_name = (create_folder_calls[0].get("json_body") or {}).get("name", "")
         self.assertTrue(sent_name)
         self.assertLessEqual(len(sent_name.encode("utf-8")), 256)
+
+    def test_ensure_folder_path_raises_clear_error_on_invalid_folder_token(self) -> None:
+        """Invalid folder token error should include actionable message.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        http_client.fail_folder_params_for_token = "test_folder_token"
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "test_folder_token",
+            convert_max_bytes = 20
+        )
+
+        with self.assertRaises(ApiResponseError) as ctx:
+            doc_writer.ensure_folder_path(relative_dir = "demo")
+
+        self.assertIn("Invalid FEISHU_FOLDER_TOKEN", str(ctx.exception))
+        self.assertIn("test_folder_token", str(ctx.exception))
 
     def test_webhook_notify_chunked(self) -> None:
         """Webhook notification should split overlong messages.

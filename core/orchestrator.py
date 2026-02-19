@@ -363,6 +363,7 @@ class ImportOrchestrator:
         folder_nav_title: str = "00-导航总目录",
         llm_fallback: str = "toc_ambiguity",
         llm_max_calls: int = 3,
+        skip_root_readme: bool = False,
         max_workers: int = 1,
         chunk_workers: int = 2
     ) -> ImportResult:
@@ -384,6 +385,7 @@ class ImportOrchestrator:
             folder_nav_title: Folder navigation document title.
             llm_fallback: LLM fallback strategy for TOC ambiguity.
             llm_max_calls: Maximum number of LLM calls in one run.
+            skip_root_readme: Whether to skip only root README.md/readme.md.
             max_workers: Process worker count for grouped import.
             chunk_workers: Thread worker count for per-document chunk planning.
         """
@@ -394,7 +396,8 @@ class ImportOrchestrator:
             structure_order = structure_order,
             toc_file = toc_file,
             llm_fallback = llm_fallback,
-            llm_max_calls = llm_max_calls
+            llm_max_calls = llm_max_calls,
+            skip_root_readme = skip_root_readme
         )
         result = ImportResult(total = len(manifest.items))
         if manifest.skipped_items:
@@ -747,7 +750,8 @@ class ImportOrchestrator:
         structure_order: str,
         toc_file: str,
         llm_fallback: str,
-        llm_max_calls: int
+        llm_max_calls: int,
+        skip_root_readme: bool
     ) -> ImportManifest:
         """Build import manifest with optional TOC-aware ordering.
 
@@ -757,11 +761,13 @@ class ImportOrchestrator:
             toc_file: TOC file path.
             llm_fallback: LLM fallback strategy.
             llm_max_calls: LLM call cap.
+            skip_root_readme: Whether to skip root README markdown file.
         """
 
         planner = OrchestrationPlanner(
             source_adapter = self.source_adapter,
-            llm_resolver = self.llm_client if llm_fallback == "toc_ambiguity" else None
+            llm_resolver = self.llm_client if llm_fallback == "toc_ambiguity" else None,
+            skip_root_readme = skip_root_readme
         )
         manifest = planner.build_manifest(
             markdown_paths = paths,

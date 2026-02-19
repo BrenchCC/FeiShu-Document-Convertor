@@ -23,6 +23,7 @@
 ✅ **容错机制**：按文件粒度失败不中断，任务末尾统一汇总
 ✅ **通知系统**：支持 webhook 或 chat_id 发送进度
 ✅ **表格处理优化**：直接降级策略避免飞书 API 参数限制
+✅ **Web 控制台**：支持本地目录/单文件导入，参数链路与 CLI 对齐
 
 ## 📁 目录结构
 
@@ -60,6 +61,174 @@ main.py          # CLI 入口点
 python main.py -h
 ```
 
+## 🌐 Web 控制台
+
+### 启动 Web 服务
+
+```bash
+python web/main.py
+```
+
+默认监听 `0.0.0.0:8000`。可通过环境变量覆盖：
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `WEB_HOST` | Web 监听地址 | `0.0.0.0` |
+| `WEB_PORT` | Web 监听端口 | `8000` |
+| `WEB_RELOAD` | 是否热更新 | `true` |
+| `WEB_PUBLIC_BASE_URL` | 对外展示访问地址（日志展示） | 自动推断 |
+
+示例：
+
+```bash
+WEB_HOST=127.0.0.1 WEB_PORT=9000 python web/main.py
+```
+
+### 本地导入（文件/目录自适应）
+
+1. 在 Web 页面选择 `本地目录`。
+2. 点击 `浏览`，系统会先尝试文件选择（`.md/.markdown`），未选择时自动回退到目录选择。
+3. 选择后会自动上传到服务端临时目录并填充 `本地路径`，无需手填路径类型。
+
+说明：
+- 单文件导入仅支持 `.md` 与 `.markdown`。
+- 如在无 GUI 环境运行，原生选择器接口会返回 409，请改用手动输入路径。
+
+### Web 高级参数与 CLI 对齐
+
+Web 导入请求会透传以下关键参数，与 CLI 行为一致：
+
+- `ref/branch/subdir`（对应 `--ref/--subdir`）
+- `structure_order/toc_file`（对应 `--structure-order/--toc-file`）
+- `folder_subdirs`（对应 `--folder-subdirs`）
+- `skip_root_readme`（对应 `--skip-root-readme`，默认关闭）
+- `folder_root_subdir`（对应 `--folder-root-subdir`）
+- `folder_root_subdir_name`（对应 `--folder-root-subdir-name`，用于自定义任务根子目录名）
+- `folder_nav_doc/folder_nav_title`（对应 `--folder-nav-doc/--folder-nav-title`）
+- `llm_fallback/llm_max_calls`（对应 `--llm-fallback/--llm-max-calls`）
+- `max_workers/chunk_workers`（对应 `--max-workers/--chunk-workers`）
+- `notify_level/dry_run`（对应 `--notify-level/--dry-run`）
+
+### curl 快速示例
+
+先设置基地址：
+
+```bash
+BASE_URL="http://127.0.0.1:8000"
+```
+
+健康检查：
+
+```bash
+curl -s "${BASE_URL}/health"
+```
+
+读取当前系统配置：
+
+```bash
+curl -s "${BASE_URL}/api/system/config"
+```
+
+更新系统配置（示例）：
+
+```bash
+curl -s -X POST "${BASE_URL}/api/system/config" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "feishu_app_id": "cli_xxx",
+    "feishu_app_secret": "xxx",
+    "feishu_folder_token": "fld_xxx",
+    "llm_base_url": "https://api.openai.com/v1",
+    "llm_api_key": "sk-xxx",
+    "llm_model": "gpt-4o-mini"
+  }'
+```
+
+本地目录扫描：
+
+```bash
+curl -s "${BASE_URL}/api/sources/local/scan?path=/absolute/path/to/docs&recursive=true"
+```
+
+调用系统原生选择器（目录）：
+
+```bash
+curl -s -X POST "${BASE_URL}/api/sources/local/pick" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target": "directory",
+    "extensions": ["md", "markdown"]
+  }'
+```
+
+启动本地导入任务（示例，含根子目录自定义）：
+
+```bash
+curl -s -X POST "${BASE_URL}/api/import/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_type": "local",
+    "path": "/absolute/path/to/docs",
+    "write_mode": "folder",
+    "import_type": "directory",
+    "structure_order": "toc_first",
+    "toc_file": "TABLE_OF_CONTENTS.md",
+    "folder_subdirs": true,
+    "folder_root_subdir": true,
+    "folder_root_subdir_name": "my-custom-batch",
+    "folder_nav_doc": true,
+    "folder_nav_title": "00-导航总目录",
+    "llm_fallback": "toc_ambiguity",
+    "llm_max_calls": 3,
+    "skip_root_readme": false,
+    "max_workers": 2,
+    "chunk_workers": 2,
+    "notify_level": "normal",
+    "dry_run": false
+  }'
+```
+
+启动 GitHub 导入任务（示例）：
+
+```bash
+curl -s -X POST "${BASE_URL}/api/import/start" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source_type": "github",
+    "path": "BrenchCC/Context_Engineering_Analysis",
+    "ref": "main",
+    "subdir": "docs",
+    "write_mode": "wiki",
+    "space_name": "Context Engineering Analysis",
+    "notify_level": "minimal",
+    "dry_run": false
+  }'
+```
+
+查询任务状态（把 `<TASK_ID>` 替换成返回的 `task_id`）：
+
+```bash
+curl -s "${BASE_URL}/api/import/status/<TASK_ID>"
+```
+
+查询任务结果：
+
+```bash
+curl -s "${BASE_URL}/api/import/result/<TASK_ID>"
+```
+
+取消任务：
+
+```bash
+curl -s -X POST "${BASE_URL}/api/import/cancel/<TASK_ID>"
+```
+
+查询任务列表：
+
+```bash
+curl -s "${BASE_URL}/api/tasks/?page=1&page_size=10"
+```
+
 ### 命令总语法
 
 ```bash
@@ -71,6 +240,7 @@ python main.py \
   [--subdir <repo_subdir>] \
   --write-mode {folder|wiki|both} \
   [--folder-subdirs | --no-folder-subdirs] \
+  [--skip-root-readme] \
   [--folder-root-subdir | --no-folder-root-subdir] \
   [--folder-root-subdir-name <task_root_folder_name>] \
   [--structure-order {toc_first|path}] \
@@ -104,7 +274,7 @@ python main.py \
 | 参数 | 说明 | 约束 |
 |------|------|------|
 | `--source` | 数据源类型 | 必填，`local` 或 `github` |
-| `--path` | 本地目录路径 | `--source local` 时必填，指向仓库根或子目录 |
+| `--path` | 本地路径（目录或单个 Markdown 文件） | `--source local` 时必填，支持仓库目录、子目录或单文件 |
 | `--repo` | GitHub 仓库地址 | `--source github` 时必填，支持 `owner/name` 或完整 URL |
 | `--ref` | GitHub 分支/标签/提交 | 默认 `main` |
 | `--subdir` | GitHub 子目录 | 默认空，填相对路径 |
@@ -114,7 +284,8 @@ python main.py \
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
 | `--write-mode` | 写入模式 | `folder` 写飞书云盘；`wiki` 写知识库；`both` 两者都写 |
-| `--folder-subdirs` | 按源目录自动创建子文件夹 | 默认关闭；根 `README.md/readme.md/index.md` 会过滤，子目录 README 保留 |
+| `--folder-subdirs` | 按源目录自动创建子文件夹 | 默认关闭 |
+| `--skip-root-readme` | 跳过根目录 `README.md/readme.md` | 默认关闭；开启后仅过滤根 README，不影响 `index.md` |
 | `--folder-root-subdir` | 是否先创建任务根子文件夹 | 默认开启 |
 | `--folder-root-subdir-name` | 任务根文件夹名称 | 空则自动生成 `<source_name>-<yyyyMMdd-HHmm>` |
 | `--structure-order` | 文档排序策略 | `toc_first` 优先 TOC；`path` 按路径字典序 |

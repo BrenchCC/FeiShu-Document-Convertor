@@ -201,8 +201,8 @@ class TestOrchestrationPlanner(unittest.TestCase):
         self.assertEqual(manifest.llm_calls, 1)
         self.assertLessEqual(resolver.calls, 1)
 
-    def test_root_readme_filtered_but_subdir_readme_kept(self) -> None:
-        """Root README should be filtered while subdir README remains included.
+    def test_root_readme_kept_by_default(self) -> None:
+        """Root README should be included by default.
 
         Args:
             self: Test case instance.
@@ -227,16 +227,15 @@ class TestOrchestrationPlanner(unittest.TestCase):
             llm_max_calls = 0
         )
 
-        self.assertEqual(len(manifest.items), 2)
+        self.assertEqual(len(manifest.items), 3)
         self.assertEqual(
             [item.path for item in manifest.items],
-            ["TABLE_OF_CONTENTS.md", "sub/README.md"]
+            ["README.md", "TABLE_OF_CONTENTS.md", "sub/README.md"]
         )
         self.assertTrue(all(item.is_index for item in manifest.items))
-        self.assertEqual(len(manifest.skipped_items), 1)
-        self.assertEqual(manifest.skipped_items[0].path, "README.md")
+        self.assertEqual(len(manifest.skipped_items), 0)
 
-    def test_toc_link_to_root_readme_recorded_as_skipped(self) -> None:
+    def test_toc_link_to_root_readme_recorded_as_skipped_when_enabled(self) -> None:
         """TOC links to filtered root README should be reported as skipped.
 
         Args:
@@ -257,7 +256,10 @@ class TestOrchestrationPlanner(unittest.TestCase):
             docs = docs,
             paths = ["TABLE_OF_CONTENTS.md", "README.md", "sub/README.md"]
         )
-        planner = OrchestrationPlanner(source_adapter = source)
+        planner = OrchestrationPlanner(
+            source_adapter = source,
+            skip_root_readme = True
+        )
 
         manifest = planner.build_manifest(
             markdown_paths = source.list_markdown(),
@@ -276,8 +278,50 @@ class TestOrchestrationPlanner(unittest.TestCase):
         )
         self.assertTrue(all(item.is_index for item in manifest.items))
 
-    def test_root_index_filtered_but_subdir_index_kept(self) -> None:
-        """Root index should be filtered while subdir index remains included.
+    def test_root_readme_filtered_but_subdir_readme_kept_when_enabled(self) -> None:
+        """Root README should be filtered when skip flag is enabled.
+
+        Args:
+            self: Test case instance.
+        """
+
+        docs = {
+            "README.md": self._doc(path = "README.md"),
+            "TABLE_OF_CONTENTS.md": self._doc(path = "TABLE_OF_CONTENTS.md"),
+            "sub/README.md": self._doc(path = "sub/README.md")
+        }
+        source = PlannerSource(
+            docs = docs,
+            paths = ["README.md", "TABLE_OF_CONTENTS.md", "sub/README.md"]
+        )
+        planner = OrchestrationPlanner(
+            source_adapter = source,
+            skip_root_readme = True
+        )
+
+        manifest = planner.build_manifest(
+            markdown_paths = source.list_markdown(),
+            structure_order = "path",
+            toc_file = "TABLE_OF_CONTENTS.md",
+            llm_fallback = "off",
+            llm_max_calls = 0
+        )
+
+        self.assertEqual(
+            [item.path for item in manifest.items],
+            ["TABLE_OF_CONTENTS.md", "sub/README.md"]
+        )
+        self.assertEqual(
+            [item.path for item in manifest.skipped_items],
+            ["README.md"]
+        )
+        self.assertEqual(
+            [item.reason for item in manifest.skipped_items],
+            ["root_readme_filtered"]
+        )
+
+    def test_root_index_kept_even_when_skip_root_readme_enabled(self) -> None:
+        """Root index should not be filtered by README-only skip rule.
 
         Args:
             self: Test case instance.
@@ -292,7 +336,10 @@ class TestOrchestrationPlanner(unittest.TestCase):
             docs = docs,
             paths = ["index.md", "TABLE_OF_CONTENTS.md", "sub/index.md"]
         )
-        planner = OrchestrationPlanner(source_adapter = source)
+        planner = OrchestrationPlanner(
+            source_adapter = source,
+            skip_root_readme = True
+        )
 
         manifest = planner.build_manifest(
             markdown_paths = source.list_markdown(),
@@ -304,16 +351,9 @@ class TestOrchestrationPlanner(unittest.TestCase):
 
         self.assertEqual(
             [item.path for item in manifest.items],
-            ["TABLE_OF_CONTENTS.md", "sub/index.md"]
+            ["TABLE_OF_CONTENTS.md", "index.md", "sub/index.md"]
         )
-        self.assertEqual(
-            [item.path for item in manifest.skipped_items],
-            ["index.md"]
-        )
-        self.assertEqual(
-            [item.reason for item in manifest.skipped_items],
-            ["root_readme_filtered"]
-        )
+        self.assertEqual(len(manifest.skipped_items), 0)
 
 
 if __name__ == "__main__":

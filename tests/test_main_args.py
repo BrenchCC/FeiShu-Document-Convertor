@@ -38,6 +38,7 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.folder_nav_title, "00-导航总目录")
         self.assertEqual(args.llm_fallback, "toc_ambiguity")
         self.assertEqual(args.llm_max_calls, 3)
+        self.assertEqual(args.skip_root_readme, False)
         self.assertEqual(args.folder_subdirs, False)
         self.assertEqual(args.folder_root_subdir, True)
         self.assertEqual(args.folder_root_subdir_name, "")
@@ -286,6 +287,26 @@ class TestMainArgs(unittest.TestCase):
             args = parse_args()
 
         self.assertEqual(args.max_workers, 3)
+
+    def test_parse_skip_root_readme_option(self) -> None:
+        """Should parse skip root README option.
+
+        Args:
+            self: Test case instance.
+        """
+
+        argv = [
+            "prog",
+            "--source",
+            "local",
+            "--path",
+            "./docs",
+            "--skip-root-readme"
+        ]
+        with mock.patch("sys.argv", argv):
+            args = parse_args()
+
+        self.assertEqual(args.skip_root_readme, True)
 
 
 if __name__ == "__main__":

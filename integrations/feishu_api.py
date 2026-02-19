@@ -428,8 +428,19 @@ class FeishuServiceBase:
 
         code = payload.get("code")
         if code != 0:
+            error_payload = payload.get("error", {})
+            log_id = ""
+            if isinstance(error_payload, dict):
+                log_id = str(error_payload.get("log_id", "")).strip()
+            details = []
+            if log_id:
+                details.append(f"log_id = {log_id}")
             raise ApiResponseError(
-                f"Feishu API failed for {path}: code = {code}, msg = {payload.get('msg', 'unknown')}"
+                (
+                    f"Feishu API failed for {path}: code = {code}, "
+                    f"msg = {payload.get('msg', 'unknown')}"
+                    f"{', ' + ', '.join(details) if details else ''}"
+                )
             )
 
         return payload
@@ -566,7 +577,7 @@ class DocWriterService(FeishuServiceBase):
             http_client = http_client,
             base_url = base_url
         )
-        self.folder_token = folder_token
+        self.folder_token = folder_token.strip()
         self.convert_max_bytes = convert_max_bytes
         self.chunk_workers = max(1, int(chunk_workers))
         self._folder_children_cache: Dict[str, Dict[str, str]] = {}
@@ -754,11 +765,18 @@ class DocWriterService(FeishuServiceBase):
             if page_token:
                 params["page_token"] = page_token
 
-            payload = self._request_json(
-                method = "GET",
-                path = "/open-apis/drive/v1/files",
-                params = params
-            )
+            try:
+                payload = self._request_json(
+                    method = "GET",
+                    path = "/open-apis/drive/v1/files",
+                    params = params
+                )
+            except ApiResponseError as exc:
+                self._raise_folder_token_param_error(
+                    exc = exc,
+                    parent_token = parent_token
+                )
+                raise
 
             data = payload.get("data", {})
             for item in data.get("files", []):
@@ -790,6 +808,27 @@ class DocWriterService(FeishuServiceBase):
 
         self._folder_children_cache[parent_token] = dict(result)
         return result
+
+    def _raise_folder_token_param_error(self, exc: Exception, parent_token: str) -> None:
+        """Raise clearer error when folder token is invalid for drive list API.
+
+        Args:
+            exc: Original API exception.
+            parent_token: Parent folder token used for listing.
+        """
+
+        message = str(exc)
+        normalized = message.lower()
+        if "code = 1061002" not in normalized and "params error" not in normalized:
+            return
+
+        raise ApiResponseError(
+            (
+                "Invalid FEISHU_FOLDER_TOKEN or parent folder token for Drive list API. "
+                f"folder_token = {parent_token}. "
+                "Please copy a real folder token from Feishu drive URL and update FEISHU_FOLDER_TOKEN."
+            )
+        ) from exc
 
     def _create_child_folder(self, parent_token: str, folder_name: str) -> str:
         """Create one child folder under parent and return its token.

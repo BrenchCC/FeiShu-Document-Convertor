@@ -95,10 +95,16 @@ def _load_dotenv_if_exists(dotenv_path: str = ".env") -> None:
         dotenv_path: .env file path.
     """
 
-    if not os.path.exists(dotenv_path):
+    # 尝试从项目根目录加载 .env 文件
+    # 项目根目录是 config 目录的父目录
+    import pathlib
+    project_root = pathlib.Path(__file__).parent.parent
+    env_path = project_root / dotenv_path
+
+    if not env_path.exists():
         return
 
-    with open(dotenv_path, "r", encoding = "utf-8") as fp:
+    with open(env_path, "r", encoding = "utf-8") as fp:
         for raw_line in fp:
             line = raw_line.strip()
             if not line or line.startswith("#"):

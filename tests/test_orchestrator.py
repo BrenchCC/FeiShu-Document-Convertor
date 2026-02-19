@@ -901,8 +901,8 @@ class TestImportOrchestrator(unittest.TestCase):
         self.assertEqual(writer.created_titles[0], "第 3 章：工具调用基础")
         self.assertEqual(writer.created_titles[1], "Part2-工具与扩展 - 第03章：工具调用基础")
 
-    def test_root_readme_filtered_from_import(self) -> None:
-        """Root README should be skipped by planner filter.
+    def test_root_readme_kept_from_import_by_default(self) -> None:
+        """Root README should be imported when skip flag is disabled.
 
         Args:
             self: Test case instance.
@@ -953,6 +953,67 @@ class TestImportOrchestrator(unittest.TestCase):
             notify_level = "none",
             write_mode = "folder",
             folder_nav_doc = False
+        )
+
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.skipped, 0)
+        self.assertEqual(len(result.skipped_items), 0)
+        self.assertEqual(len(writer.created_titles), 2)
+
+    def test_root_readme_filtered_from_import_when_enabled(self) -> None:
+        """Root README should be skipped when skip flag is enabled.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        doc = SourceDocument(
+            path = "README.md",
+            title = "《AI Agent 架构：从单体到企业级多智能体》",
+            markdown = "# root",
+            assets = [],
+            relative_dir = "",
+            base_ref = "/tmp",
+            source_type = "local"
+        )
+        writer = RetryOnceInvalidParamDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = SingleDocSource(doc = doc),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            folder_nav_doc = False,
+            skip_root_readme = True
         )
 
         self.assertEqual(result.success, 0)

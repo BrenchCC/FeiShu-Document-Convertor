@@ -1,9 +1,11 @@
 class FeishuImportApp {
     constructor() {
+        this.apiBase = '/api';
+        this.localSelectionTarget = '';
         this.initElements();
         this.bindEvents();
         this.loadConfig();
-        this.setupMockData();
+        this.updateFolderRootSubdirState();
     }
 
     initElements() {
@@ -22,6 +24,17 @@ class FeishuImportApp {
         this.$logContainer = document.getElementById('logContainer');
         this.$clearLog = document.getElementById('clearLog');
         this.$browseBtn = document.getElementById('browseBtn');
+        this.$importType = document.getElementById('importType');
+        this.$directoryInput = document.getElementById('directoryInput');
+        this.$fileInput = document.getElementById('fileInput');
+        this.$folderRootSubdir = document.getElementById('folderRootSubdir');
+        this.$folderRootSubdirName = document.getElementById('folderRootSubdirName');
+        if (this.$importType) {
+            const importTypeGroup = this.$importType.closest('.form-group');
+            if (importTypeGroup) {
+                importTypeGroup.style.display = 'none';
+            }
+        }
     }
 
     bindEvents() {
@@ -39,7 +52,12 @@ class FeishuImportApp {
             }
         });
         this.$clearLog.addEventListener('click', () => this.clearLog());
-        this.$browseBtn.addEventListener('click', () => this.browseFolder());
+        this.$browseBtn.addEventListener('click', () => this.browseLocalPath());
+        this.$directoryInput.addEventListener('change', (event) => this.handleLocalSelection(event, 'directory'));
+        this.$fileInput.addEventListener('change', (event) => this.handleLocalSelection(event, 'file'));
+        if (this.$folderRootSubdir) {
+            this.$folderRootSubdir.addEventListener('change', () => this.updateFolderRootSubdirState());
+        }
     }
 
     switchSource(source) {
@@ -75,37 +93,61 @@ class FeishuImportApp {
 
     loadConfig() {
         const config = localStorage.getItem('feishuImportConfig');
-        if (config) {
-            const parsed = JSON.parse(config);
-            Object.keys(parsed).forEach(key => {
-                const element = document.getElementById(key);
-                if (element) {
-                    if (element.type === 'checkbox') {
-                        element.checked = parsed[key];
-                    } else {
-                        element.value = parsed[key];
-                    }
-                }
-            });
-            this.addLog('配置已加载', 'info');
+        if (!config) {
+            return;
         }
+
+        const parsed = JSON.parse(config);
+        Object.keys(parsed).forEach((key) => {
+            const element = document.getElementById(key);
+            if (!element) {
+                return;
+            }
+            if (element.type === 'checkbox') {
+                element.checked = parsed[key];
+            } else {
+                element.value = parsed[key];
+            }
+        });
+        this.addLog('配置已加载', 'info');
     }
 
     saveConfig() {
         const config = {
-            feishuAppId: document.getElementById('feishuAppId').value,
-            feishuAppSecret: document.getElementById('feishuAppSecret').value,
-            feishuFolderToken: document.getElementById('feishuFolderToken').value,
-            feishuWebhookUrl: document.getElementById('feishuWebhookUrl').value
+            feishuAppId: this.getElementValue('feishuAppId'),
+            feishuAppSecret: this.getElementValue('feishuAppSecret'),
+            feishuFolderToken: this.getElementValue('feishuFolderToken'),
+            feishuWebhookUrl: this.getElementValue('feishuWebhookUrl')
         };
 
         localStorage.setItem('feishuImportConfig', JSON.stringify(config));
+        this.updateBackendConfig(config);
+
         this.hideConfig();
         this.showToast('配置已保存', 'success');
         this.addLog('应用配置已保存', 'success');
     }
 
-    runImport() {
+    async updateBackendConfig(config) {
+        try {
+            const response = await fetch(`${this.apiBase}/system/config`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(config)
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+        } catch (error) {
+            console.error('更新配置失败:', error);
+            this.addLog(`配置更新失败: ${error.message}`, 'error');
+        }
+    }
+
+    async runImport() {
         if (!this.validateForm()) {
             return;
         }
@@ -116,20 +158,21 @@ class FeishuImportApp {
         this.updateStatus(0, 0, 0, 0);
 
         this.addLog('任务开始', 'info');
-        this.simulateImportProcess();
+        await this.startImportProcess();
     }
 
     validateForm() {
-        const source = this.$localBtn.classList.contains('active') ? 'local' : 'github';
+        const source = this.getSourceType();
 
         if (source === 'local') {
-            const localPath = document.getElementById('localPath').value.trim();
+            const localPath = this.getElementValue('localPath').trim();
             if (!localPath) {
-                this.showToast('请选择本地目录路径', 'error');
+                const targetName = this.getImportType() === 'file' ? 'Markdown 文件' : '本地目录';
+                this.showToast(`请选择${targetName}路径`, 'error');
                 return false;
             }
         } else {
-            const githubRepo = document.getElementById('githubRepo').value.trim();
+            const githubRepo = this.getElementValue('githubRepo').trim();
             if (!githubRepo) {
                 this.showToast('请输入 GitHub 仓库地址', 'error');
                 return false;
@@ -139,62 +182,163 @@ class FeishuImportApp {
         return true;
     }
 
-    async simulateImportProcess() {
-        const steps = [
-            { msg: '初始化源适配器', delay: 500 },
-            { msg: '解析源文件结构', delay: 800 },
-            { msg: '发现 15 个 Markdown 文件', delay: 600 },
-            { msg: '创建文档编排计划', delay: 700 },
-            { msg: '开始处理文档：01-简介.md', delay: 1000 },
-            { msg: '成功上传图片：architecture.png', delay: 400 },
-            { msg: '文档 01-简介.md 导入成功', delay: 500 },
-            { msg: '开始处理文档：02-快速开始.md', delay: 900 },
-            { msg: '自动处理表格块', delay: 300 },
-            { msg: '文档 02-快速开始.md 导入成功', delay: 500 },
-            { msg: '开始处理文档：03-API 参考.md', delay: 1200 },
-            { msg: '转换代码块为飞书格式', delay: 400 },
-            { msg: '文档 03-API 参考.md 导入成功', delay: 500 },
-            { msg: '处理媒体文件上传', delay: 600 },
-            { msg: '生成导航文档', delay: 800 },
-            { msg: '任务执行完成', delay: 300 }
-        ];
+    async startImportProcess() {
+        try {
+            const request = this.buildImportRequest();
+            const response = await fetch(`${this.apiBase}/import/start`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(request)
+            });
 
-        let processed = 0;
-        const total = 15;
-
-        for (let i = 0; i < steps.length; i++) {
-            const step = steps[i];
-            await this.delay(step.delay);
-
-            if (step.msg.includes('导入成功')) {
-                processed++;
-                this.updateStatus(total, processed, 0, 0);
+            if (!response.ok) {
+                throw new Error(`启动任务失败: ${response.statusText}`);
             }
 
-            this.addLog(step.msg, this.getLogType(step.msg));
+            const result = await response.json();
+            const taskId = result.task_id;
+            this.addLog(`任务已启动，任务ID: ${taskId}`, 'success');
+            await this.monitorTask(taskId);
+        } catch (error) {
+            console.error('导入失败:', error);
+            this.addLog(`导入失败: ${error.message}`, 'error');
+            this.showToast(`导入失败: ${error.message}`, 'error');
+
+            this.$runBtn.disabled = false;
+            this.$runBtn.innerHTML = '<i class="fas fa-play"></i> 开始导入';
         }
+    }
 
-        const failed = 1;
-        const skipped = 2;
-        this.updateStatus(total, processed - failed - skipped, failed, skipped);
+    buildImportRequest() {
+        const source = this.getSourceType();
+        const githubRef = this.getElementValue('githubRef').trim();
+        const maxWorkers = Number.parseInt(this.getElementValue('maxWorkers'), 10) || 1;
+        const chunkWorkers = Number.parseInt(this.getElementValue('chunkWorkers'), 10) || 2;
+        const tocFile = this.getElementValue('tocFile').trim() || 'TABLE_OF_CONTENTS.md';
+        const folderNavTitle = this.getElementValue('folderNavTitle').trim() || '00-导航总目录';
+        const folderRootSubdir = this.getCheckboxValue('folderRootSubdir');
+        const folderRootSubdirName = folderRootSubdir ? this.getElementValue('folderRootSubdirName').trim() : '';
+        const llmMaxCalls = Number.parseInt(this.getElementValue('llmMaxCalls'), 10);
 
-        await this.delay(500);
-        this.showToast(`任务完成！成功导入 ${processed - failed - skipped} 个文档，失败 ${failed} 个，跳过 ${skipped} 个`, 'success');
+        return {
+            source_type: source,
+            import_type: source === 'local' ? this.getImportType() : undefined,
+            path: source === 'local'
+                ? this.getElementValue('localPath').trim()
+                : this.getElementValue('githubRepo').trim(),
+            write_mode: this.getElementValue('writeMode'),
+            space_name: this.getOptionalValue('spaceName'),
+            space_id: this.getOptionalValue('spaceId'),
+            chat_id: this.getOptionalValue('chatId'),
+            ref: source === 'github' ? githubRef || undefined : undefined,
+            branch: source === 'github' ? githubRef || undefined : undefined,
+            commit: undefined,
+            subdir: source === 'github' ? this.getOptionalValue('githubSubdir') : undefined,
+            structure_order: this.getElementValue('structureOrder') || 'toc_first',
+            toc_file: tocFile,
+            folder_subdirs: this.getCheckboxValue('folderSubdirs'),
+            folder_root_subdir: folderRootSubdir,
+            folder_root_subdir_name: folderRootSubdirName,
+            folder_nav_doc: this.getCheckboxValue('folderNavDoc'),
+            folder_nav_title: folderNavTitle,
+            llm_fallback: this.getElementValue('llmFallback') || 'toc_ambiguity',
+            llm_max_calls: Number.isNaN(llmMaxCalls) ? 3 : Math.max(0, llmMaxCalls),
+            skip_root_readme: this.getCheckboxValue('skipRootReadme'),
+            max_workers: maxWorkers,
+            chunk_workers: chunkWorkers,
+            notify_level: this.getElementValue('notifyLevel') || 'normal',
+            dry_run: this.getCheckboxValue('dryRun')
+        };
+    }
+
+    updateFolderRootSubdirState() {
+        if (!this.$folderRootSubdir || !this.$folderRootSubdirName) {
+            return;
+        }
+        const enabled = Boolean(this.$folderRootSubdir.checked);
+        this.$folderRootSubdirName.disabled = !enabled;
+        if (!enabled) {
+            this.$folderRootSubdirName.value = '';
+        }
+    }
+
+    async monitorTask(taskId) {
+        const pollInterval = 2000;
+        let isCompleted = false;
+
+        while (!isCompleted) {
+            try {
+                const response = await fetch(`${this.apiBase}/import/status/${taskId}`);
+
+                if (!response.ok) {
+                    throw new Error(`获取任务状态失败: ${response.statusText}`);
+                }
+
+                const status = await response.json();
+
+                if (status.progress > 0) {
+                    this.updateProgress(status.progress);
+                }
+
+                if (status.message) {
+                    this.addLog(status.message, 'info');
+                }
+
+                if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
+                    isCompleted = true;
+                    await this.getTaskResult(taskId, status.status);
+                } else {
+                    await this.delay(pollInterval);
+                }
+            } catch (error) {
+                console.error('监控任务失败:', error);
+                this.addLog(`任务监控失败: ${error.message}`, 'error');
+                await this.delay(pollInterval);
+            }
+        }
+    }
+
+    async getTaskResult(taskId, status) {
+        try {
+            const response = await fetch(`${this.apiBase}/import/result/${taskId}`);
+
+            if (!response.ok) {
+                throw new Error(`获取任务结果失败: ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            this.updateStatus(result.total, result.success, result.failed, result.skipped);
+
+            if (result.failures.length > 0) {
+                this.addLog(`失败文件: ${result.failures.join(', ')}`, 'error');
+            }
+
+            if (result.skipped_items.length > 0) {
+                this.addLog(`跳过文件: ${result.skipped_items.join(', ')}`, 'warning');
+            }
+
+            const message = status === 'completed'
+                ? `任务完成！成功导入 ${result.success} 个文档，失败 ${result.failed} 个，跳过 ${result.skipped} 个`
+                : status === 'failed'
+                    ? `任务失败！共处理 ${result.total} 个文档，成功 ${result.success} 个，失败 ${result.failed} 个，跳过 ${result.skipped} 个`
+                    : '任务已取消';
+
+            const toastType = status === 'completed' ? 'success' : status === 'failed' ? 'error' : 'warning';
+            this.showToast(message, toastType);
+            this.addLog(message, toastType);
+        } catch (error) {
+            console.error('获取任务结果失败:', error);
+            this.addLog(`获取任务结果失败: ${error.message}`, 'error');
+        }
 
         this.$runBtn.disabled = false;
         this.$runBtn.innerHTML = '<i class="fas fa-play"></i> 开始导入';
     }
 
-    getLogType(msg) {
-        if (msg.includes('成功') || msg.includes('完成')) {
-            return 'success';
-        } else if (msg.includes('失败') || msg.includes('错误')) {
-            return 'error';
-        } else if (msg.includes('自动处理') || msg.includes('跳过')) {
-            return 'warning';
-        } else {
-            return 'info';
-        }
+    updateProgress(percent) {
+        this.addLog(`进度: ${percent}%`, 'info');
     }
 
     updateStatus(total, success, failed, skipped) {
@@ -239,12 +383,68 @@ class FeishuImportApp {
         `;
     }
 
-    browseFolder() {
-        const path = prompt('请输入本地目录路径', '/path/to/docs');
-        if (path) {
-            document.getElementById('localPath').value = path;
-            this.addLog(`已选择目录：${path}`, 'info');
+    async browseLocalPath() {
+        const target = this.inferSelectionTarget();
+        if (target === 'auto') {
+            const fileSelected = await this.triggerPickerAndWait(this.$fileInput);
+            if (!fileSelected) {
+                this.$directoryInput.click();
+            }
+            return;
         }
+        if (target === 'file') {
+            this.$fileInput.click();
+            return;
+        }
+        this.$directoryInput.click();
+    }
+
+    async handleLocalSelection(event, target) {
+        const files = Array.from(event.target.files || []);
+        if (files.length === 0) {
+            return;
+        }
+        try {
+            const payload = await this.uploadLocalSelection(files, target);
+            const selectedPath = payload.path || '';
+            document.getElementById('localPath').value = selectedPath;
+            this.localSelectionTarget = target;
+            const label = target === 'file' ? '文件' : '目录';
+            this.addLog(`已选择${label}并上传：${selectedPath}`, 'info');
+        } catch (error) {
+            this.showToast(`路径选择失败: ${error.message}`, 'error');
+            this.addLog(`路径选择失败: ${error.message}`, 'error');
+        } finally {
+            event.target.value = '';
+        }
+    }
+
+    async uploadLocalSelection(files, target) {
+        const formData = new FormData();
+        formData.append('target', target);
+        const entries = files.map((file) => {
+            const relativePath = target === 'directory'
+                ? (file.webkitRelativePath || file.name)
+                : file.name;
+            return {
+                relative_path: relativePath
+            };
+        });
+        formData.append('entries_json', JSON.stringify(entries));
+        files.forEach((file) => {
+            formData.append('files', file, file.name);
+        });
+
+        const response = await fetch(`${this.apiBase}/sources/local/upload`, {
+            method: 'POST',
+            body: formData
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            const detail = payload.detail || '上传失败';
+            throw new Error(detail);
+        }
+        return payload;
     }
 
     showToast(message, type = 'info') {
@@ -277,16 +477,82 @@ class FeishuImportApp {
         }, 3000);
     }
 
-    setupMockData() {
-        const mockConfig = {
-            feishuAppId: 'cli_a1b2c3d4e5f6g7h8',
-            feishuAppSecret: '********************************',
-            feishuFolderToken: 'fld1234567890abcdef1234567890abcdef',
-            feishuWebhookUrl: ''
-        };
+    getSourceType() {
+        return this.$localBtn.classList.contains('active') ? 'local' : 'github';
+    }
 
-        localStorage.setItem('feishuImportConfig', JSON.stringify(mockConfig));
-        this.loadConfig();
+    getImportType() {
+        return this.inferSelectionTarget();
+    }
+
+    inferSelectionTarget() {
+        const localPath = this.getElementValue('localPath').trim().toLowerCase();
+        if (localPath.endsWith('.md') || localPath.endsWith('.markdown')) {
+            return 'file';
+        }
+        if (localPath) {
+            return 'directory';
+        }
+        if (this.localSelectionTarget) {
+            return this.localSelectionTarget;
+        }
+        return 'auto';
+    }
+
+    triggerPickerAndWait(inputElement) {
+        return new Promise((resolve) => {
+            let settled = false;
+
+            const cleanup = () => {
+                inputElement.removeEventListener('change', onChangeCapture);
+                window.removeEventListener('focus', onWindowFocus, true);
+            };
+            const settle = (selected) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                cleanup();
+                resolve(Boolean(selected));
+            };
+            const onChangeCapture = (event) => {
+                const selected = (event.target.files || []).length > 0;
+                settle(selected);
+            };
+            const onWindowFocus = () => {
+                setTimeout(() => {
+                    const selected = (inputElement.files || []).length > 0;
+                    if (!selected) {
+                        settle(false);
+                    }
+                }, 160);
+            };
+
+            inputElement.addEventListener('change', onChangeCapture);
+            window.addEventListener('focus', onWindowFocus, true);
+            inputElement.click();
+        });
+    }
+
+    getElementValue(elementId) {
+        const element = document.getElementById(elementId);
+        if (!element) {
+            return '';
+        }
+        return element.value || '';
+    }
+
+    getOptionalValue(elementId) {
+        const value = this.getElementValue(elementId).trim();
+        return value || undefined;
+    }
+
+    getCheckboxValue(elementId) {
+        const element = document.getElementById(elementId);
+        if (!element) {
+            return false;
+        }
+        return Boolean(element.checked);
     }
 
     delay(ms) {

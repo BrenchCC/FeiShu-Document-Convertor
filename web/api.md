@@ -4,6 +4,32 @@
 
 这是飞书知识库自动导入器的后端 API 接口文档。后端使用 FastAPI 框架，提供 RESTful API 接口，供前端调用以执行文档导入任务。
 
+## 最新补充（2026-02）
+
+- 新增本地原生选择器接口：`POST /api/sources/local/pick`
+  - 请求示例：
+    ```json
+    {
+      "target": "directory",
+      "extensions": ["md", "markdown"]
+    }
+    ```
+  - 响应示例：
+    ```json
+    {
+      "path": "/absolute/path/to/docs",
+      "target": "directory"
+    }
+    ```
+- 新增浏览器文件选择上传接口：`POST /api/sources/local/upload`
+  - 用于接收浏览器选择器（目录/文件）返回的文件集合并保存为服务端临时路径。
+- Web 导入请求 `POST /api/import/start` 新增并透传字段：
+  - `space_id`, `chat_id`, `subdir`, `structure_order`, `toc_file`,
+  - `folder_subdirs`, `folder_root_subdir`, `folder_root_subdir_name`,
+  - `folder_nav_doc`, `folder_nav_title`, `llm_fallback`, `llm_max_calls`,
+  - `skip_root_readme`, `import_type`
+- `skip_root_readme` 默认 `false`：仅在显式开启时跳过根 `README.md/readme.md`，不会过滤根 `index.md`。
+
 ## 基础配置
 
 ### 服务器信息

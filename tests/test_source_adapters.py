@@ -37,6 +37,42 @@ class TestLocalSourceAdapter(unittest.TestCase):
             self.assertEqual(doc.title, "Demo")
             self.assertEqual(doc.relative_dir, "a")
 
+    def test_list_and_read_markdown_single_file_mode(self) -> None:
+        """Should support importing one local markdown file directly.
+
+        Args:
+            self: Test case instance.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown_path = Path(tmp) / "single.md"
+            markdown_path.write_text("# Single\ncontent", encoding = "utf-8")
+
+            adapter = LocalSourceAdapter(root_path = str(markdown_path))
+            paths = adapter.list_markdown()
+
+            self.assertEqual(paths, ["single.md"])
+            doc = adapter.read_markdown(relative_path = "single.md")
+            self.assertEqual(doc.title, "Single")
+            self.assertEqual(doc.relative_dir, "")
+
+    def test_list_markdown_supports_markdown_extension(self) -> None:
+        """Should include both .md and .markdown files.
+
+        Args:
+            self: Test case instance.
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir(parents = True, exist_ok = True)
+            (root / "docs" / "a.md").write_text("# A\n", encoding = "utf-8")
+            (root / "docs" / "b.markdown").write_text("# B\n", encoding = "utf-8")
+
+            adapter = LocalSourceAdapter(root_path = str(root))
+            paths = adapter.list_markdown()
+            self.assertEqual(paths, ["docs/a.md", "docs/b.markdown"])
+
 
 class TestGitHubSourceAdapter(unittest.TestCase):
     """Tests for git-based GitHub source adapter."""

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>飞书知识库自动导入器</title>
+    <link rel="icon" type="image/png" href="/assets/logo.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -60,15 +61,17 @@
                         <div class="form-group">
                             <label for="localPath">
                                 <i class="fas fa-folder"></i>
-                                本地目录路径
+                                本地路径
                             </label>
                             <div class="input-group">
-                                <input type="text" id="localPath" placeholder="请输入本地目录路径，如 /path/to/docs">
+                                <input type="text" id="localPath" placeholder="请输入本地路径，如 /path/to/docs 或 /path/to/file.md">
                                 <button class="btn btn-ghost" id="browseBtn">
                                     <i class="fas fa-folder-open"></i>
                                     浏览
                                 </button>
                             </div>
+                            <input type="file" id="directoryInput" webkitdirectory directory style="display: none;">
+                            <input type="file" id="fileInput" accept=".md,.markdown" style="display: none;">
                         </div>
                     </div>
 
@@ -156,7 +159,7 @@
                         </h2>
                         <button class="btn btn-ghost" id="toggleAdvanced">
                             <i class="fas fa-chevron-down"></i>
-                            展开
+                            <span>展开</span>
                         </button>
                     </div>
 
@@ -183,7 +186,7 @@
                                 </label>
                                 <select id="chunkWorkers">
                                     <option value="1">1</option>
-                                    <option value="2">2</option>
+                                    <option value="2" selected>2</option>
                                     <option value="3">3</option>
                                     <option value="4">4</option>
                                 </select>
@@ -222,6 +225,17 @@
                             </div>
 
                             <div class="form-group">
+                                <label for="folderRootSubdir">
+                                    <i class="fas fa-layer-group"></i>
+                                    创建任务根子目录
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="folderRootSubdir" checked>
+                                    <span class="checkmark"></span>
+                                </label>
+                            </div>
+
+                            <div class="form-group">
                                 <label for="folderNavDoc">
                                     <i class="fas fa-file-alt"></i>
                                     生成导航文档
@@ -231,6 +245,25 @@
                                     <span class="checkmark"></span>
                                 </label>
                             </div>
+
+                            <div class="form-group">
+                                <label for="skipRootReadme">
+                                    <i class="fas fa-ban"></i>
+                                    跳过根 README.md
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="skipRootReadme">
+                                    <span class="checkmark"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="folderRootSubdirName">
+                                <i class="fas fa-font"></i>
+                                根子目录名称
+                            </label>
+                            <input type="text" id="folderRootSubdirName" placeholder="留空则自动生成，例如 docs-20260219-2248">
                         </div>
 
                         <div class="form-row">
@@ -246,14 +279,22 @@
                             </div>
 
                             <div class="form-group">
-                                <label for="oauthLocalServer">
-                                    <i class="fas fa-server"></i>
-                                    OAuth 本地授权服务器
+                                <label for="llmFallback">
+                                    <i class="fas fa-robot"></i>
+                                    LLM 回退策略
                                 </label>
-                                <label class="checkbox-container">
-                                    <input type="checkbox" id="oauthLocalServer" checked>
-                                    <span class="checkmark"></span>
+                                <select id="llmFallback">
+                                    <option value="toc_ambiguity">toc_ambiguity</option>
+                                    <option value="off">off</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="llmMaxCalls">
+                                    <i class="fas fa-hashtag"></i>
+                                    LLM 最大调用次数
                                 </label>
+                                <input type="number" id="llmMaxCalls" min="0" step="1" value="3">
                             </div>
                         </div>
 

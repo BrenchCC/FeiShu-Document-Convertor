@@ -1,9 +1,9 @@
-import abc
 import os
 import re
+import abc
 import shutil
-import subprocess
 import tempfile
+import subprocess
 import urllib.parse
 
 from pathlib import Path
@@ -35,7 +35,7 @@ class SourceAdapter(abc.ABC):
 
 
 class LocalSourceAdapter(SourceAdapter):
-    """Source adapter for local markdown directory.
+    """Source adapter for local markdown directory or one markdown file.
 
     Args:
         root_path: Local root directory path.
@@ -43,6 +43,10 @@ class LocalSourceAdapter(SourceAdapter):
 
     def __init__(self, root_path: str) -> None:
         self.root_path = os.path.abspath(root_path)
+        self._root_path_obj = Path(self.root_path)
+        self._file_mode = self._root_path_obj.is_file()
+        self._source_root = self._root_path_obj.parent if self._file_mode else self._root_path_obj
+        self._single_relative_path = self._root_path_obj.name if self._file_mode else ""
 
     def list_markdown(self) -> List[str]:
         """Collect markdown files from local root.
@@ -51,9 +55,16 @@ class LocalSourceAdapter(SourceAdapter):
             self: Adapter instance.
         """
 
+        if self._file_mode:
+            if _is_markdown_path(path = self._root_path_obj):
+                return [self._single_relative_path]
+            return []
+
         result = []
-        for path in Path(self.root_path).rglob("*.md"):
-            relative = str(path.relative_to(self.root_path)).replace("\\", "/")
+        for path in self._root_path_obj.rglob("*"):
+            if not _is_markdown_path(path = path):
+                continue
+            relative = str(path.relative_to(self._source_root)).replace("\\", "/")
             result.append(relative)
         return sorted(result)
 
@@ -65,15 +76,19 @@ class LocalSourceAdapter(SourceAdapter):
             relative_path: Source-relative markdown path.
         """
 
-        full_path = Path(self.root_path) / relative_path
+        normalized_relative_path = str(Path(relative_path)).replace("\\", "/")
+        if self._file_mode and normalized_relative_path != self._single_relative_path:
+            raise FileNotFoundError(f"Local markdown path not found: {relative_path}")
+
+        full_path = self._source_root / normalized_relative_path
         markdown = full_path.read_text(encoding = "utf-8", errors = "ignore")
-        title = _extract_title(markdown = markdown, relative_path = relative_path)
-        relative_dir = str(Path(relative_path).parent).replace("\\", "/")
+        title = _extract_title(markdown = markdown, relative_path = normalized_relative_path)
+        relative_dir = str(Path(normalized_relative_path).parent).replace("\\", "/")
         if relative_dir == ".":
             relative_dir = ""
         base_ref = str(full_path.parent)
         return SourceDocument(
-            path = relative_path,
+            path = normalized_relative_path,
             title = title,
             markdown = markdown,
             assets = [],
@@ -120,7 +135,9 @@ class GitHubSourceAdapter(SourceAdapter):
 
         scan_root = self._scan_root()
         result = []
-        for path in scan_root.rglob("*.md"):
+        for path in scan_root.rglob("*"):
+            if not _is_markdown_path(path = path):
+                continue
             relative = str(path.relative_to(self._repo_root)).replace("\\", "/")
             result.append(relative)
         return sorted(result)
@@ -368,3 +385,15 @@ def _extract_title(markdown: str, relative_path: str) -> str:
     if match:
         return match.group(1).strip()
     return Path(relative_path).stem
+
+
+def _is_markdown_path(path: Path) -> bool:
+    """Check whether path is one markdown file supported by importer.
+
+    Args:
+        path: Local filesystem path.
+    """
+
+    if not path.is_file():
+        return False
+    return path.suffix.lower() in {".md", ".markdown"}
