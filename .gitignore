@@ -34,6 +34,7 @@ logs/
 cache/
 .feishu_user_token.json
 *.gitkeep
+examples/*
 # PyInstaller
 #  Usually these files are written by a python script from a template
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
@@ -429,3 +430,4 @@ __marimo__/
 # Code Agent
 AGENTS.md
 CLAUDE.md
+.claude

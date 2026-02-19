@@ -1,6 +1,12 @@
 import unittest
 
+from unittest import mock
+
 from config.config import AppConfig
+from data.models import CreatedDocRecord
+from data.models import DocumentPlanItem
+from data.models import ImportFailure
+from data.models import ImportManifest
 from data.models import SourceDocument
 from core.orchestrator import ImportOrchestrator
 from utils.markdown_processor import MarkdownProcessor
@@ -410,6 +416,130 @@ class NavDocWriter(FakeDocWriter):
             self.nav_markdown = content
 
 
+class FakeLlmFolderNav:
+    """Fake LLM nav generator returning path-based markdown links."""
+
+    def generate_folder_nav_markdown(
+        self,
+        context_markdown: str,
+        documents: list[dict[str, str]]
+    ) -> str:
+        """Return deterministic nav markdown.
+
+        Args:
+            self: Fake llm instance.
+            context_markdown: Context markdown.
+            documents: Document descriptors.
+        """
+
+        return (
+            "# 导航\n\n"
+            "- [Chapter 1](a/ch1.md)\n"
+            "- [Chapter 2](b/ch2.md)\n"
+        )
+
+
+class ReadmePreferredSource:
+    """Source adapter that includes root README and TOC context files."""
+
+    def __init__(self) -> None:
+        self.docs = {
+            "README.md": SourceDocument(
+                path = "README.md",
+                title = "README",
+                markdown = "# Root Readme Context\n\nReadme first.",
+                assets = [],
+                relative_dir = "",
+                base_ref = "/tmp",
+                source_type = "local"
+            ),
+            "TABLE_OF_CONTENTS.md": SourceDocument(
+                path = "TABLE_OF_CONTENTS.md",
+                title = "TOC",
+                markdown = "# TOC Context\n\n- [Chapter 1](a/ch1.md)",
+                assets = [],
+                relative_dir = "",
+                base_ref = "/tmp",
+                source_type = "local"
+            ),
+            "a/ch1.md": SourceDocument(
+                path = "a/ch1.md",
+                title = "Chapter 1",
+                markdown = "# Chapter 1",
+                assets = [],
+                relative_dir = "a",
+                base_ref = "/tmp",
+                source_type = "local"
+            )
+        }
+
+    def list_markdown(self):
+        """List markdown files preserving deterministic order.
+
+        Args:
+            self: Source adapter instance.
+        """
+
+        return ["README.md", "TABLE_OF_CONTENTS.md", "a/ch1.md"]
+
+    def read_markdown(self, relative_path: str):
+        """Read one markdown document by relative path.
+
+        Args:
+            self: Source adapter instance.
+            relative_path: Source-relative markdown path.
+        """
+
+        return self.docs[relative_path]
+
+
+class CaptureContextLlmFolderNav:
+    """Fake LLM that captures provided context markdown and returns one link."""
+
+    def __init__(self) -> None:
+        self.context_markdown = ""
+
+    def generate_folder_nav_markdown(
+        self,
+        context_markdown: str,
+        documents: list[dict[str, str]]
+    ) -> str:
+        """Capture context and return one valid source-path link markdown.
+
+        Args:
+            self: Fake llm instance.
+            context_markdown: Context markdown.
+            documents: Document descriptors.
+        """
+
+        self.context_markdown = context_markdown
+        target_path = ""
+        if documents:
+            target_path = str(documents[0].get("path", "")).strip()
+        if not target_path:
+            return ""
+        return f"# 导航\n\n- [First]({target_path})\n"
+
+
+class EmptyLlmFolderNav:
+    """Fake LLM that returns empty nav output to trigger skip behavior."""
+
+    def generate_folder_nav_markdown(
+        self,
+        context_markdown: str,
+        documents: list[dict[str, str]]
+    ) -> str:
+        """Return empty markdown content.
+
+        Args:
+            self: Fake llm instance.
+            context_markdown: Context markdown.
+            documents: Document descriptors.
+        """
+
+        return ""
+
+
 class TestImportOrchestrator(unittest.TestCase):
     """Tests for import orchestrator behavior."""
 
@@ -771,8 +901,8 @@ class TestImportOrchestrator(unittest.TestCase):
         self.assertEqual(writer.created_titles[0], "第 3 章：工具调用基础")
         self.assertEqual(writer.created_titles[1], "Part2-工具与扩展 - 第03章：工具调用基础")
 
-    def test_root_readme_can_retry_with_filename_title(self) -> None:
-        """Root README should fallback to filename when heading title is invalid.
+    def test_root_readme_filtered_from_import(self) -> None:
+        """Root README should be skipped by planner filter.
 
         Args:
             self: Test case instance.
@@ -825,9 +955,12 @@ class TestImportOrchestrator(unittest.TestCase):
             folder_nav_doc = False
         )
 
-        self.assertEqual(result.success, 1)
+        self.assertEqual(result.success, 0)
         self.assertEqual(result.failed, 0)
-        self.assertEqual(writer.created_titles, ["《AI Agent 架构：从单体到企业级多智能体》", "README"])
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(len(result.skipped_items), 1)
+        self.assertEqual(result.skipped_items[0].path, "README.md")
+        self.assertEqual(writer.created_titles, [])
 
     def test_both_mode_respects_path_order_manifest(self) -> None:
         """Write-mode both should follow planned order before writing docs.
@@ -932,6 +1065,521 @@ class TestImportOrchestrator(unittest.TestCase):
         self.assertEqual(result.failed, 0)
         self.assertIn("[Chapter 1](https://example.com/doc_ch1)", writer.nav_markdown)
         self.assertIn("document_id: `doc_ch2`", writer.nav_markdown)
+
+    def test_folder_navigation_doc_generated_by_llm_in_subdir_mode(self) -> None:
+        """Subdir mode should use LLM nav markdown and replace source links.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = NavDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None,
+            llm_client = FakeLlmFolderNav()
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            structure_order = "path",
+            folder_subdirs = True,
+            folder_nav_doc = True
+        )
+
+        self.assertEqual(result.success, 2)
+        self.assertEqual(result.failed, 0)
+        self.assertIn("[Chapter 1](https://example.com/doc_ch1)", writer.nav_markdown)
+        self.assertIn("document_id: `doc_ch2`", writer.nav_markdown)
+
+    def test_folder_navigation_llm_prefers_root_readme_context(self) -> None:
+        """LLM folder nav should use root README context before TOC content.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        llm = CaptureContextLlmFolderNav()
+        writer = NavDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = ReadmePreferredSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None,
+            llm_client = llm
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            structure_order = "path",
+            folder_subdirs = True,
+            folder_nav_doc = True
+        )
+
+        self.assertEqual(result.failed, 0)
+        self.assertIn("Root Readme Context", llm.context_markdown)
+        self.assertNotIn("TOC Context", llm.context_markdown)
+
+    def test_folder_navigation_llm_empty_output_skips_navigation_doc(self) -> None:
+        """Empty LLM output should skip creating folder navigation doc.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        writer = NavDocWriter()
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = writer,
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None,
+            llm_client = EmptyLlmFolderNav()
+        )
+
+        result = orchestrator.run(
+            space_name = "",
+            space_id = "",
+            chat_id = "",
+            dry_run = False,
+            notify_level = "none",
+            write_mode = "folder",
+            structure_order = "path",
+            folder_subdirs = True,
+            folder_nav_doc = True
+        )
+
+        self.assertEqual(result.success, 2)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(writer.nav_markdown, "")
+        self.assertNotIn("00-导航总目录", writer.created_titles)
+
+    def test_run_uses_grouped_multiprocess_when_max_workers_gt_one(self) -> None:
+        """Run should route into grouped multiprocess branch when max_workers > 1.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = FakeDocWriter(),
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+        mocked_outcome = {
+            "success": 1,
+            "failures": [ImportFailure(path = "b/ch2.md", reason = "simulated")],
+            "created_docs": [
+                CreatedDocRecord(
+                    path = "a/ch1.md",
+                    title = "Chapter 1",
+                    document_id = "doc_ch1",
+                    doc_url = "https://example.com/doc_ch1",
+                    wiki_node_token = ""
+                )
+            ]
+        }
+
+        with mock.patch.object(
+            orchestrator,
+            "_run_grouped_multiprocess_import",
+            return_value = mocked_outcome
+        ) as mocked_run:
+            result = orchestrator.run(
+                space_name = "",
+                space_id = "",
+                chat_id = "",
+                dry_run = False,
+                notify_level = "none",
+                write_mode = "folder",
+                structure_order = "path",
+                folder_nav_doc = False,
+                max_workers = 2
+            )
+
+        mocked_run.assert_called_once()
+        self.assertEqual(result.success, 1)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.failures[0].path, "b/ch2.md")
+
+    def test_grouped_multiprocess_keyboard_interrupt_terminates_pool(self) -> None:
+        """KeyboardInterrupt in grouped import should terminate process pool immediately.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = FakeDocWriter(),
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+
+        manifest = ImportManifest(
+            items = [
+                DocumentPlanItem(
+                    path = "a/ch1.md",
+                    order = 0,
+                    is_index = False,
+                    relative_dir = "a",
+                    toc_label = ""
+                )
+            ]
+        )
+        snapshots = {
+            "a/ch1.md": SourceDocument(
+                path = "a/ch1.md",
+                title = "Chapter 1",
+                markdown = "# Chapter 1",
+                assets = [],
+                relative_dir = "a",
+                base_ref = "/tmp",
+                source_type = "local"
+            )
+        }
+
+        fake_executor = mock.Mock()
+        fake_executor.submit.side_effect = lambda *args, **kwargs: mock.Mock()
+
+        with mock.patch.object(
+            orchestrator,
+            "_build_doc_snapshots",
+            return_value = (snapshots, [])
+        ), mock.patch.object(
+            orchestrator,
+            "_build_folder_token_by_path",
+            return_value = {"a/ch1.md": "folder_a"}
+        ), mock.patch.object(
+            orchestrator,
+            "_build_wiki_parent_by_path",
+            return_value = {}
+        ), mock.patch(
+            "core.orchestrator.ProcessPoolExecutor",
+            return_value = fake_executor
+        ), mock.patch(
+            "core.orchestrator.as_completed",
+            side_effect = KeyboardInterrupt()
+        ), mock.patch.object(
+            orchestrator,
+            "_terminate_process_pool"
+        ) as terminate_mock:
+            with self.assertRaises(KeyboardInterrupt):
+                orchestrator._run_grouped_multiprocess_import(
+                    manifest = manifest,
+                    write_mode = "folder",
+                    space_id = "",
+                    folder_subdirs = True,
+                    folder_root_relative_dir = "",
+                    folder_root_token = "",
+                    max_workers = 2,
+                    chunk_workers = 2,
+                    chat_id = "",
+                    notify_level = "none"
+                )
+
+        terminate_mock.assert_called_once_with(executor = fake_executor)
+
+    def test_grouped_multiprocess_collects_success_and_failure(self) -> None:
+        """Grouped multiprocess should isolate one group failure from others.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = FakeDocWriter(),
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+        manifest = ImportManifest(
+            items = [
+                DocumentPlanItem(
+                    path = "a/ch1.md",
+                    order = 0,
+                    is_index = False,
+                    relative_dir = "a",
+                    toc_label = ""
+                ),
+                DocumentPlanItem(
+                    path = "b/ch2.md",
+                    order = 1,
+                    is_index = False,
+                    relative_dir = "b",
+                    toc_label = ""
+                )
+            ]
+        )
+        snapshots = {
+            "a/ch1.md": SourceDocument(
+                path = "a/ch1.md",
+                title = "Chapter 1",
+                markdown = "# Chapter 1",
+                assets = [],
+                relative_dir = "a",
+                base_ref = "/tmp",
+                source_type = "local"
+            ),
+            "b/ch2.md": SourceDocument(
+                path = "b/ch2.md",
+                title = "Chapter 2",
+                markdown = "# Chapter 2",
+                assets = [],
+                relative_dir = "b",
+                base_ref = "/tmp",
+                source_type = "local"
+            )
+        }
+
+        future_success = mock.Mock()
+        future_failure = mock.Mock()
+        future_success.result.return_value = {
+            "success": 1,
+            "failures": [],
+            "created_docs": [
+                {
+                    "path": "a/ch1.md",
+                    "title": "Chapter 1",
+                    "document_id": "doc_ch1",
+                    "doc_url": "https://example.com/doc_ch1",
+                    "wiki_node_token": ""
+                }
+            ]
+        }
+        future_failure.result.side_effect = RuntimeError("group failed")
+
+        fake_executor = mock.Mock()
+        fake_executor.submit.side_effect = [future_success, future_failure]
+
+        with mock.patch.object(
+            orchestrator,
+            "_build_doc_snapshots",
+            return_value = (snapshots, [])
+        ), mock.patch.object(
+            orchestrator,
+            "_build_folder_token_by_path",
+            return_value = {
+                "a/ch1.md": "folder_a",
+                "b/ch2.md": "folder_b"
+            }
+        ), mock.patch.object(
+            orchestrator,
+            "_build_wiki_parent_by_path",
+            return_value = {}
+        ), mock.patch(
+            "core.orchestrator.ProcessPoolExecutor",
+            return_value = fake_executor
+        ), mock.patch(
+            "core.orchestrator.as_completed",
+            return_value = [future_success, future_failure]
+        ):
+            outcome = orchestrator._run_grouped_multiprocess_import(
+                manifest = manifest,
+                write_mode = "folder",
+                space_id = "",
+                folder_subdirs = True,
+                folder_root_relative_dir = "",
+                folder_root_token = "",
+                max_workers = 2,
+                chunk_workers = 2,
+                chat_id = "",
+                notify_level = "none"
+            )
+
+        self.assertEqual(outcome["success"], 1)
+        self.assertEqual(len(outcome["created_docs"]), 1)
+        self.assertEqual(len(outcome["failures"]), 1)
+        self.assertEqual(outcome["failures"][0].path, "group:b")
+
+    def test_group_items_by_top_dir(self) -> None:
+        """Top directory grouping should keep first-seen group order.
+
+        Args:
+            self: Test case instance.
+        """
+
+        config = AppConfig(
+            feishu_base_url = "https://open.feishu.cn",
+            feishu_webhook_url = "",
+            feishu_app_id = "w",
+            feishu_app_secret = "w",
+            feishu_user_access_token = "",
+            feishu_user_refresh_token = "",
+            feishu_user_token_cache_path = "cache/user_token.json",
+            feishu_folder_token = "fld_x",
+            request_timeout = 30,
+            max_retries = 1,
+            retry_backoff = 0.1,
+            image_url_template = "https://example.com/{token}",
+            feishu_message_max_bytes = 18000,
+            feishu_convert_max_bytes = 45000,
+            notify_level = "none"
+        )
+        orchestrator = ImportOrchestrator(
+            source_adapter = OrderedSource(),
+            markdown_processor = MarkdownProcessor(),
+            config = config,
+            doc_writer = FakeDocWriter(),
+            media_service = FakeMedia(),
+            wiki_service = None,
+            notify_service = None
+        )
+        items = [
+            DocumentPlanItem(
+                path = "a/ch1.md",
+                order = 0,
+                is_index = False,
+                relative_dir = "a"
+            ),
+            DocumentPlanItem(
+                path = "b/ch2.md",
+                order = 1,
+                is_index = False,
+                relative_dir = "b"
+            ),
+            DocumentPlanItem(
+                path = "README.md",
+                order = 2,
+                is_index = True,
+                relative_dir = ""
+            )
+        ]
+
+        grouped = orchestrator._group_items_by_top_dir(items = items)
+        self.assertEqual([key for key, _ in grouped], ["a", "b", "__root__"])
 
 
 if __name__ == "__main__":

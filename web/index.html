@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>飞书知识库自动导入器</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <header class="app-header">
+            <div class="header-content">
+                <div class="logo-section">
+                    <div class="logo-icon">
+                        <i class="fas fa-book-open"></i>
+                    </div>
+                    <div class="logo-text">
+                        <h1>飞书知识库自动导入器</h1>
+                        <p>将本地或 GitHub 文档自动导入飞书云文档</p>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button class="btn btn-secondary" id="configBtn">
+                        <i class="fas fa-cog"></i>
+                        配置
+                    </button>
+                    <button class="btn btn-primary" id="runBtn">
+                        <i class="fas fa-play"></i>
+                        开始导入
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <main class="app-main">
+            <div class="main-content">
+                <section class="config-section">
+                    <div class="section-header">
+                        <h2>
+                            <i class="fas fa-database"></i>
+                            源配置
+                        </h2>
+                        <div class="source-tabs">
+                            <button class="tab-btn active" data-source="local">
+                                <i class="fas fa-folder-open"></i>
+                                本地目录
+                            </button>
+                            <button class="tab-btn" data-source="github">
+                                <i class="fab fa-github"></i>
+                                GitHub 仓库
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="source-config" id="localConfig">
+                        <div class="form-group">
+                            <label for="localPath">
+                                <i class="fas fa-folder"></i>
+                                本地目录路径
+                            </label>
+                            <div class="input-group">
+                                <input type="text" id="localPath" placeholder="请输入本地目录路径，如 /path/to/docs">
+                                <button class="btn btn-ghost" id="browseBtn">
+                                    <i class="fas fa-folder-open"></i>
+                                    浏览
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="source-config hidden" id="githubConfig">
+                        <div class="form-group">
+                            <label for="githubRepo">
+                                <i class="fab fa-github"></i>
+                                GitHub 仓库
+                            </label>
+                            <input type="text" id="githubRepo" placeholder="请输入仓库地址，如 BrenchCC/Context_Engineering_Analysis 或 URL">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="githubRef">
+                                <i class="fas fa-code-branch"></i>
+                                分支/标签/提交
+                            </label>
+                            <input type="text" id="githubRef" placeholder="默认为 main">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="githubSubdir">
+                                <i class="fas fa-folder-tree"></i>
+                                子目录路径
+                            </label>
+                            <input type="text" id="githubSubdir" placeholder="仓库中的子目录，如 docs/zh">
+                        </div>
+                    </div>
+                </section>
+
+                <section class="config-section">
+                    <div class="section-header">
+                        <h2>
+                            <i class="fas fa-cloud"></i>
+                            目标配置
+                        </h2>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="writeMode">
+                                <i class="fas fa-pen-square"></i>
+                                写入模式
+                            </label>
+                            <select id="writeMode">
+                                <option value="folder">云盘文件夹</option>
+                                <option value="wiki">知识库</option>
+                                <option value="both">两者都写</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="spaceName">
+                                <i class="fas fa-book"></i>
+                                知识库空间名称
+                            </label>
+                            <input type="text" id="spaceName" placeholder="如 Context Engineering Analysis">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="spaceId">
+                                <i class="fas fa-hashtag"></i>
+                                知识库空间 ID
+                            </label>
+                            <input type="text" id="spaceId" placeholder="已存在的知识库空间 ID（可选）">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="chatId">
+                                <i class="fas fa-comments"></i>
+                                飞书群聊 ID
+                            </label>
+                            <input type="text" id="chatId" placeholder="用于接收通知的群聊 ID（可选）">
+                        </div>
+                    </div>
+                </section>
+
+                <section class="config-section">
+                    <div class="section-header">
+                        <h2>
+                            <i class="fas fa-sliders-h"></i>
+                            高级选项
+                        </h2>
+                        <button class="btn btn-ghost" id="toggleAdvanced">
+                            <i class="fas fa-chevron-down"></i>
+                            展开
+                        </button>
+                    </div>
+
+                    <div class="advanced-options hidden" id="advancedOptions">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="maxWorkers">
+                                    <i class="fas fa-users"></i>
+                                    工作进程数
+                                </label>
+                                <select id="maxWorkers">
+                                    <option value="1">1（串行）</option>
+                                    <option value="2">2</option>
+                                    <option value="3">3</option>
+                                    <option value="4">4</option>
+                                    <option value="8">8</option>
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="chunkWorkers">
+                                    <i class="fas fa-tasks"></i>
+                                    块规划线程数
+                                </label>
+                                <select id="chunkWorkers">
+                                    <option value="1">1</option>
+                                    <option value="2">2</option>
+                                    <option value="3">3</option>
+                                    <option value="4">4</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="structureOrder">
+                                <i class="fas fa-sort"></i>
+                                文档排序策略
+                            </label>
+                            <select id="structureOrder">
+                                <option value="toc_first">TOC 优先</option>
+                                <option value="path">路径排序</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="tocFile">
+                                <i class="fas fa-list"></i>
+                                TOC 文件路径
+                            </label>
+                            <input type="text" id="tocFile" placeholder="默认为 TABLE_OF_CONTENTS.md">
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="folderSubdirs">
+                                    <i class="fas fa-folder-open"></i>
+                                    自动创建子文件夹层级
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="folderSubdirs">
+                                    <span class="checkmark"></span>
+                                </label>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="folderNavDoc">
+                                    <i class="fas fa-file-alt"></i>
+                                    生成导航文档
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="folderNavDoc" checked>
+                                    <span class="checkmark"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="dryRun">
+                                    <i class="fas fa-play-circle"></i>
+                                    只解析不写入（调试模式）
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="dryRun">
+                                    <span class="checkmark"></span>
+                                </label>
+                            </div>
+
+                            <div class="form-group">
+                                <label for="oauthLocalServer">
+                                    <i class="fas fa-server"></i>
+                                    OAuth 本地授权服务器
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="oauthLocalServer" checked>
+                                    <span class="checkmark"></span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="notifyLevel">
+                                <i class="fas fa-bell"></i>
+                                通知级别
+                            </label>
+                            <select id="notifyLevel">
+                                <option value="normal">正常</option>
+                                <option value="minimal">精简</option>
+                                <option value="none">无</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="folderNavTitle">
+                                <i class="fas fa-heading"></i>
+                                导航文档标题
+                            </label>
+                            <input type="text" id="folderNavTitle" placeholder="默认为 00-导航总目录">
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <aside class="sidebar">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>
+                            <i class="fas fa-info-circle"></i>
+                            任务状态
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="status-display">
+                            <div class="status-item">
+                                <span class="status-label">总文件数</span>
+                                <span class="status-value" id="totalCount">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">成功</span>
+                                <span class="status-value success" id="successCount">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">失败</span>
+                                <span class="status-value error" id="failedCount">0</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">跳过</span>
+                                <span class="status-value warning" id="skippedCount">0</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>
+                            <i class="fas fa-history"></i>
+                            任务日志
+                        </h3>
+                        <button class="btn btn-ghost btn-sm" id="clearLog">
+                            <i class="fas fa-trash"></i>
+                            清空
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="log-container" id="logContainer">
+                            <div class="log-entry info">
+                                <i class="fas fa-info-circle"></i>
+                                <span>等待开始任务...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </main>
+
+        <div class="modal hidden" id="configModal">
+            <div class="modal-overlay"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>
+                        <i class="fas fa-cog"></i>
+                        应用配置
+                    </h2>
+                    <button class="modal-close" id="closeConfigModal">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="feishuAppId">
+                            <i class="fas fa-key"></i>
+                            飞书应用 ID
+                        </label>
+                        <input type="text" id="feishuAppId" placeholder="请输入飞书应用 ID">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="feishuAppSecret">
+                            <i class="fas fa-shield-alt"></i>
+                            飞书应用密钥
+                        </label>
+                        <input type="password" id="feishuAppSecret" placeholder="请输入飞书应用密钥">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="feishuFolderToken">
+                            <i class="fas fa-folder-open"></i>
+                            飞书文件夹 Token
+                        </label>
+                        <input type="text" id="feishuFolderToken" placeholder="请输入飞书文件夹 Token">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="feishuWebhookUrl">
+                            <i class="fas fa-link"></i>
+                            飞书 Webhook URL
+                        </label>
+                        <input type="text" id="feishuWebhookUrl" placeholder="请输入飞书群机器人 Webhook URL（可选）">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="cancelConfig">
+                        <i class="fas fa-times"></i>
+                        取消
+                    </button>
+                    <button class="btn btn-primary" id="saveConfig">
+                        <i class="fas fa-save"></i>
+                        保存
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="toast hidden" id="toast">
+            <div class="toast-content">
+                <i class="toast-icon"></i>
+                <span class="toast-message"></span>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

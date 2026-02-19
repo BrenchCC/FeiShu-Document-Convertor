@@ -6,6 +6,9 @@ import hashlib
 import logging
 import mimetypes
 import urllib.parse
+import threading
+
+from concurrent.futures import ThreadPoolExecutor
 
 from pathlib import Path
 from typing import Dict
@@ -519,6 +522,8 @@ class DocWriterService(FeishuServiceBase):
     FOLDER_CREATE_BACKOFF_SECONDS = 0.05
     CREATE_CHILDREN_BATCH_SIZE = 20
     NATIVE_TEXT_BLOCK_MAX_BYTES = 3000
+    SCHEMA_RETRY_MAX_ATTEMPTS = 5
+    SCHEMA_RETRY_BACKOFF_SECONDS = 0.2
 
     BLOCK_TYPE_TEXT = 2
     BLOCK_TYPE_HEADING_BASE = 2
@@ -553,7 +558,8 @@ class DocWriterService(FeishuServiceBase):
         http_client: HttpClient,
         base_url: str,
         folder_token: str = "",
-        convert_max_bytes: int = 45000
+        convert_max_bytes: int = 45000,
+        chunk_workers: int = 2
     ) -> None:
         super().__init__(
             auth_client = auth_client,
@@ -562,8 +568,10 @@ class DocWriterService(FeishuServiceBase):
         )
         self.folder_token = folder_token
         self.convert_max_bytes = convert_max_bytes
+        self.chunk_workers = max(1, int(chunk_workers))
         self._folder_children_cache: Dict[str, Dict[str, str]] = {}
         self._folder_path_cache: Dict[str, str] = {}
+        self._folder_lock = threading.RLock()
 
     def create_doc(self, title: str, folder_token: str = "") -> str:
         """Create an empty docx document and return document_id.
@@ -628,52 +636,53 @@ class DocWriterService(FeishuServiceBase):
             root_folder_token: Optional root folder token override.
         """
 
-        effective_root_token = root_folder_token or self.folder_token
-        if not effective_root_token:
-            raise ApiResponseError(
-                "FEISHU_FOLDER_TOKEN is required when using folder hierarchy mode."
-            )
+        with self._folder_lock:
+            effective_root_token = root_folder_token or self.folder_token
+            if not effective_root_token:
+                raise ApiResponseError(
+                    "FEISHU_FOLDER_TOKEN is required when using folder hierarchy mode."
+                )
 
-        normalized = relative_dir.strip().replace("\\", "/").strip("/")
-        if not normalized:
-            return effective_root_token
+            normalized = relative_dir.strip().replace("\\", "/").strip("/")
+            if not normalized:
+                return effective_root_token
 
-        cache_key = f"{effective_root_token}:{normalized}"
-        cached = self._folder_path_cache.get(cache_key, "")
-        if cached:
-            return cached
+            cache_key = f"{effective_root_token}:{normalized}"
+            cached = self._folder_path_cache.get(cache_key, "")
+            if cached:
+                return cached
 
-        current_parent = effective_root_token
-        segments = [segment for segment in normalized.split("/") if segment]
-        current_path = ""
+            current_parent = effective_root_token
+            segments = [segment for segment in normalized.split("/") if segment]
+            current_path = ""
 
-        for raw_segment in segments:
-            folder_name = self._normalize_folder_name(name = raw_segment)
-            if not folder_name:
-                continue
+            for raw_segment in segments:
+                folder_name = self._normalize_folder_name(name = raw_segment)
+                if not folder_name:
+                    continue
 
-            current_path = f"{current_path}/{folder_name}" if current_path else folder_name
-            current_cache_key = f"{effective_root_token}:{current_path}"
-            cached_token = self._folder_path_cache.get(current_cache_key, "")
-            if cached_token:
-                current_parent = cached_token
-                continue
+                current_path = f"{current_path}/{folder_name}" if current_path else folder_name
+                current_cache_key = f"{effective_root_token}:{current_path}"
+                cached_token = self._folder_path_cache.get(current_cache_key, "")
+                if cached_token:
+                    current_parent = cached_token
+                    continue
 
-            child_token = self._find_child_folder_token(
-                parent_token = current_parent,
-                folder_name = folder_name
-            )
-            if not child_token:
-                child_token = self._create_child_folder(
+                child_token = self._find_child_folder_token(
                     parent_token = current_parent,
                     folder_name = folder_name
                 )
+                if not child_token:
+                    child_token = self._create_child_folder(
+                        parent_token = current_parent,
+                        folder_name = folder_name
+                    )
 
-            self._folder_path_cache[current_cache_key] = child_token
-            current_parent = child_token
+                self._folder_path_cache[current_cache_key] = child_token
+                current_parent = child_token
 
-        self._folder_path_cache[cache_key] = current_parent
-        return current_parent
+            self._folder_path_cache[cache_key] = current_parent
+            return current_parent
 
     def _normalize_folder_name(self, name: str) -> str:
         """Normalize one folder segment name for drive folder API.
@@ -911,7 +920,9 @@ class DocWriterService(FeishuServiceBase):
             return
 
         try:
-            append_payload = self._request_json(
+            append_payload = self._request_json_with_schema_retry(
+                document_id = document_id,
+                action = "append_descendant",
                 method = "POST",
                 path = f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/descendant",
                 json_body = {
@@ -971,6 +982,74 @@ class DocWriterService(FeishuServiceBase):
 
         message = str(exc).lower()
         return "1770001" in message or "invalid param" in message
+
+    def _request_json_with_schema_retry(
+        self,
+        document_id: str,
+        action: str,
+        method: str,
+        path: str,
+        json_body: Optional[dict] = None,
+        data: Optional[dict] = None,
+        files: Optional[dict] = None
+    ) -> dict:
+        """Retry doc write requests when Feishu returns schema mismatch.
+
+        Args:
+            document_id: Target document id.
+            action: High-level action name for logging.
+            method: HTTP method.
+            path: API path.
+            json_body: Optional JSON payload.
+            data: Optional form data.
+            files: Optional multipart files.
+        """
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, self.SCHEMA_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                return self._request_json(
+                    method = method,
+                    path = path,
+                    json_body = json_body,
+                    data = data,
+                    files = files
+                )
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_schema_mismatch_error(exc = exc):
+                    raise
+                if attempt >= self.SCHEMA_RETRY_MAX_ATTEMPTS:
+                    raise
+
+                wait_seconds = self.SCHEMA_RETRY_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    (
+                        "schema mismatch retry: action = %s, document_id = %s, "
+                        "attempt = %d/%d, wait = %.2fs, err = %s"
+                    ),
+                    action,
+                    document_id,
+                    attempt,
+                    self.SCHEMA_RETRY_MAX_ATTEMPTS,
+                    wait_seconds,
+                    str(exc)
+                )
+                time.sleep(wait_seconds)
+
+        if last_exc:
+            raise last_exc
+        raise ApiResponseError("request retry failed without explicit exception")
+
+    def _is_schema_mismatch_error(self, exc: Exception) -> bool:
+        """Check whether exception indicates schema mismatch.
+
+        Args:
+            exc: Raised exception.
+        """
+
+        message = str(exc).lower()
+        return "1770006" in message or "schema mismatch" in message
 
     def _split_chunk_for_retry(self, chunk: str) -> List[str]:
         """Split one markdown chunk into smaller parts for retry.
@@ -1190,12 +1269,43 @@ class DocWriterService(FeishuServiceBase):
         if not segments:
             return
 
+        segment_chunks_map: dict[int, list[str]] = {}
+        if self.chunk_workers > 1 and len(segments) > 1:
+            with ThreadPoolExecutor(max_workers = self.chunk_workers) as executor:
+                future_index_pairs = [
+                    (
+                        executor.submit(
+                            split_markdown_by_lines,
+                            content = segment.content,
+                            max_bytes = self.convert_max_bytes
+                        ),
+                        index
+                    )
+                    for index, segment in enumerate(segments)
+                ]
+                for future, index in future_index_pairs:
+                    try:
+                        segment_chunks_map[index] = future.result()
+                    except Exception as exc:
+                        logger.warning(
+                            "segment chunk planning failed, fallback sequential split: segment = %d, err = %s",
+                            index + 1,
+                            str(exc)
+                        )
+                        segment_chunks_map[index] = split_markdown_by_lines(
+                            content = segments[index].content,
+                            max_bytes = self.convert_max_bytes
+                        )
+
         converted_chunks = 0
         fallback_chunks = 0
         for index, segment in enumerate(segments, start = 1):
-            chunks = split_markdown_by_lines(
-                content = segment.content,
-                max_bytes = self.convert_max_bytes
+            chunks = segment_chunks_map.get(
+                index - 1,
+                split_markdown_by_lines(
+                    content = segment.content,
+                    max_bytes = self.convert_max_bytes
+                )
             )
             for chunk in chunks:
                 if not chunk.strip():
@@ -1465,7 +1575,7 @@ class DocWriterService(FeishuServiceBase):
                     block_type = self.BLOCK_TYPE_TEXT,
                     field_name = "text",
                     text = row_text,
-                    parse_inline = True
+                    parse_inline = False
                 )
             )
         return blocks
@@ -1604,13 +1714,19 @@ class DocWriterService(FeishuServiceBase):
                     elements.append({"text_run": {"content": plain_text}})
 
             if match.group("link_text") is not None:
+                link_text = match.group("link_text")
+                link_url = (match.group("link_url") or "").strip()
+                if not self._is_supported_link_url(url = link_url):
+                    elements.append({"text_run": {"content": link_text}})
+                    cursor = end
+                    continue
                 elements.append(
                     {
                         "text_run": {
-                            "content": match.group("link_text"),
+                            "content": link_text,
                             "text_element_style": {
                                 "link": {
-                                    "url": match.group("link_url")
+                                    "url": link_url
                                 }
                             }
                         }
@@ -1671,6 +1787,19 @@ class DocWriterService(FeishuServiceBase):
             }
         }
 
+    def _is_supported_link_url(self, url: str) -> bool:
+        """Validate whether link url is safe for docx text element style.
+
+        Args:
+            url: Markdown link target.
+        """
+
+        value = (url or "").strip()
+        if not value:
+            return False
+        parsed = urllib.parse.urlparse(value)
+        return parsed.scheme in {"http", "https"}
+
     def _append_native_blocks(self, document_id: str, blocks: list[dict]) -> None:
         """Append native blocks to one document in small batches.
 
@@ -1684,7 +1813,9 @@ class DocWriterService(FeishuServiceBase):
 
         for index in range(0, len(blocks), self.CREATE_CHILDREN_BATCH_SIZE):
             batch = blocks[index:index + self.CREATE_CHILDREN_BATCH_SIZE]
-            self._request_json(
+            self._request_json_with_schema_retry(
+                document_id = document_id,
+                action = "append_children",
                 method = "POST",
                 path = f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
                 json_body = {
@@ -1721,7 +1852,9 @@ class DocWriterService(FeishuServiceBase):
         """
 
         snippet = content[:4000]
-        self._request_json(
+        self._request_json_with_schema_retry(
+            document_id = document_id,
+            action = "append_fallback_text",
             method = "POST",
             path = f"/open-apis/docx/v1/documents/{document_id}/blocks/{document_id}/children",
             json_body = {
@@ -1738,7 +1871,8 @@ class DocWriterService(FeishuServiceBase):
                             ]
                         }
                     }
-                ]
+                ],
+                "index": -1
             }
         )
 
@@ -1842,6 +1976,7 @@ class WikiService(FeishuServiceBase):
         self.node_cache: Dict[str, WikiNodeRef] = {}
         self.user_access_token = user_access_token.strip()
         self.user_token_manager = user_token_manager
+        self._node_lock = threading.RLock()
 
     def get_or_create_space(self, space_name: str) -> str:
         """Get wiki space by name or create one.
@@ -1901,52 +2036,53 @@ class WikiService(FeishuServiceBase):
             relative_dir: Relative directory path.
         """
 
-        normalized = relative_dir.strip("/")
-        if not normalized:
-            return ""
+        with self._node_lock:
+            normalized = relative_dir.strip("/")
+            if not normalized:
+                return ""
 
-        current_parent = ""
-        segments = [segment for segment in normalized.split("/") if segment]
+            current_parent = ""
+            segments = [segment for segment in normalized.split("/") if segment]
 
-        for segment in segments:
-            cache_key = f"{space_id}:{current_parent}:{segment}"
-            cached = self.node_cache.get(cache_key)
-            if cached:
-                current_parent = cached.node_token
-                continue
+            for segment in segments:
+                cache_key = f"{space_id}:{current_parent}:{segment}"
+                cached = self.node_cache.get(cache_key)
+                if cached:
+                    current_parent = cached.node_token
+                    continue
 
-            children = self._list_nodes(
-                space_id = space_id,
-                parent_node_token = current_parent
-            )
-            matched = None
-            for child in children:
-                title = child.get("title") or child.get("name")
-                if title == segment:
-                    matched = child
-                    break
-
-            if matched:
-                node_token = matched.get("node_token") or matched.get("wiki_token")
-                if not node_token:
-                    raise ApiResponseError("list nodes item missing node_token")
-            else:
-                node_token = self._create_catalog_node(
+                children = self._list_nodes(
                     space_id = space_id,
-                    parent_node_token = current_parent,
-                    title = segment
+                    parent_node_token = current_parent
                 )
+                matched = None
+                for child in children:
+                    title = child.get("title") or child.get("name")
+                    if title == segment:
+                        matched = child
+                        break
 
-            node_ref = WikiNodeRef(
-                space_id = space_id,
-                node_token = node_token,
-                title = segment,
-                parent_token = current_parent
-            )
-            self.node_cache[cache_key] = node_ref
-            current_parent = node_token
+                if matched:
+                    node_token = matched.get("node_token") or matched.get("wiki_token")
+                    if not node_token:
+                        raise ApiResponseError("list nodes item missing node_token")
+                else:
+                    node_token = self._create_catalog_node(
+                        space_id = space_id,
+                        parent_node_token = current_parent,
+                        title = segment
+                    )
 
-        return current_parent
+                node_ref = WikiNodeRef(
+                    space_id = space_id,
+                    node_token = node_token,
+                    title = segment,
+                    parent_token = current_parent
+                )
+                self.node_cache[cache_key] = node_ref
+                current_parent = node_token
+
+            return current_parent
 
     def move_doc_to_wiki(
         self,

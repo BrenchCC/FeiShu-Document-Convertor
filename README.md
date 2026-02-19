@@ -1,4 +1,8 @@
-# 飞书知识库自动导入器（Python CLI）
+# 飞书知识库自动导入器
+
+<p align="center">
+  <img src="assets/logo.png" alt="项目 Logo" width="500">
+</p>
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -7,7 +11,11 @@
 
 将本地目录或 GitHub 仓库中的 Markdown（含图片、公式）导入飞书云文档，并可写入知识库。
 
-## 功能概览
+## 🚀 功能概览
+
+<p align="center">
+  <img src="assets/feishu.png" alt="飞书集成" width="120">
+</p>
 
 ✅ **数据源支持**：`local` / `github`（仅 `git clone/fetch/checkout`）
 ✅ **写入模式**：`folder` / `wiki` / `both`
@@ -16,7 +24,7 @@
 ✅ **通知系统**：支持 webhook 或 chat_id 发送进度
 ✅ **表格处理优化**：直接降级策略避免飞书 API 参数限制
 
-## 目录结构
+## 📁 目录结构
 
 ```text
 config/          # 配置管理
@@ -28,7 +36,7 @@ tests/           # 单元测试与集成测试
 main.py          # CLI 入口点
 ```
 
-## 环境变量
+## 🔧 环境变量
 
 参考 `.env.example` 文件配置以下环境变量：
 
@@ -44,7 +52,7 @@ main.py          # CLI 入口点
 
 **💡 提示**：`.env` 文件已加入 `.gitignore`，不会被版本跟踪。
 
-## 快速开始
+## 🚀 快速开始
 
 ### 查看帮助信息
 
@@ -77,6 +85,7 @@ python main.py \
   [--dry-run] \
   [--notify-level {none|minimal|normal}] \
   [--max-workers <int>] \
+  [--chunk-workers <int>] \
   [--auth-code <oauth_code>] \
   [--oauth-redirect-uri <redirect_uri>] \
   [--print-auth-url] \
@@ -88,30 +97,32 @@ python main.py \
   [--oauth-state <state>]
 ```
 
-## 参数说明
+## 📋 参数说明
 
 ### 源参数
 
 | 参数 | 说明 | 约束 |
 |------|------|------|
 | `--source` | 数据源类型 | 必填，`local` 或 `github` |
-| `--path` | 本地目录路径 | `--source local` 时必填 |
-| `--repo` | GitHub 仓库地址 | `--source github` 时必填 |
-| `--ref` | 分支/标签/提交 | 默认 `main` |
-| `--subdir` | 仓库子目录 | 默认空 |
+| `--path` | 本地目录路径 | `--source local` 时必填，指向仓库根或子目录 |
+| `--repo` | GitHub 仓库地址 | `--source github` 时必填，支持 `owner/name` 或完整 URL |
+| `--ref` | GitHub 分支/标签/提交 | 默认 `main` |
+| `--subdir` | GitHub 子目录 | 默认空，填相对路径 |
 
 ### 写入参数
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--write-mode` | 写入模式 | 必填，`folder`/`wiki`/`both` |
-| `--folder-subdirs` | 自动创建子文件夹 | 默认关闭 |
-| `--folder-root-subdir` | 创建任务根子文件夹 | 默认开启 |
-| `--folder-root-subdir-name` | 任务根文件夹名称 | 自动生成 `<source_name>-<yyyyMMdd-HHmm>` |
-| `--structure-order` | 文档结构顺序 | `toc_first` |
-| `--toc-file` | TOC 文件路径 | `TABLE_OF_CONTENTS.md` |
-| `--folder-nav-doc` | 生成导航文档 | 默认开启 |
-| `--folder-nav-title` | 导航文档标题 | `00-导航总目录` |
+| `--write-mode` | 写入模式 | `folder` 写飞书云盘；`wiki` 写知识库；`both` 两者都写 |
+| `--folder-subdirs` | 按源目录自动创建子文件夹 | 默认关闭；根 `README.md/readme.md/index.md` 会过滤，子目录 README 保留 |
+| `--folder-root-subdir` | 是否先创建任务根子文件夹 | 默认开启 |
+| `--folder-root-subdir-name` | 任务根文件夹名称 | 空则自动生成 `<source_name>-<yyyyMMdd-HHmm>` |
+| `--structure-order` | 文档排序策略 | `toc_first` 优先 TOC；`path` 按路径字典序 |
+| `--toc-file` | TOC 文件路径 | 默认 `TABLE_OF_CONTENTS.md`，相对源目录 |
+| `--folder-nav-doc` | 生成导航文档 | 默认开启；`folder-subdirs=true` 走 LLM 总目录，失败直接跳过 |
+| `--folder-nav-title` | 导航文档标题 | 默认 `00-导航总目录` |
+| `--max-workers` | 文档级并发数 | `1` 串行；`>1` 按一级目录分组多进程（根目录归 `__root__`）；飞书 API 场景建议 `2~4` |
+| `--chunk-workers` | 单文档分片规划线程数 | 仅影响分片计算并发，API 写入仍顺序执行；建议不超过 CPU 逻辑核数 |
 
 ### OAuth 参数
 
@@ -119,11 +130,11 @@ python main.py \
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--oauth-local-server` | 本地回调自动授权 | 推荐使用 |
+| `--oauth-local-server` | 启动本地回调并自动交换 token | 推荐使用 |
 | `--auth-code` | 手动输入授权码 | 不常用 |
-| `--print-auth-url` | 只打印授权链接 | 用于调试 |
+| `--print-auth-url` | 只打印授权链接并退出 | 用于调试 |
 
-## 常用命令模板
+## 💡 常用命令模板
 
 ### 📁 本地目录 -> 云盘文件夹
 
@@ -134,12 +145,24 @@ python main.py \
   --write-mode folder
 ```
 
+### ⚡ 多进程导入 + 单文档分片并发（推荐）
+
+```bash
+python main.py \
+  --source local \
+  --path /path/to/docs \
+  --write-mode folder \
+  --folder-subdirs \
+  --max-workers 3 \
+  --chunk-workers 4
+```
+
 ### 🚀 GitHub 仓库 -> 云盘文件夹
 
 ```bash
 python main.py \
   --source github \
-  --repo waylandzhang/llm-transformer-book \
+  --repo BrenchCC/llm-transformer-book \
   --write-mode folder
 ```
 
@@ -170,7 +193,7 @@ python main.py \
 ```bash
 python main.py \
   --source github \
-  --repo waylandzhang/llm-transformer-book \
+  --repo BrenchCC/llm-transformer-book \
   --subdir docs/chapter1 \
   --write-mode wiki \
   --space-name "LLM Transformer"
@@ -188,7 +211,7 @@ python main.py \
   --notify-level none
 ```
 
-## OAuth 使用方法
+## 🔐 OAuth 使用方法
 
 ### A. 本地回调自动授权（推荐）
 
@@ -217,7 +240,7 @@ python main.py \
   --oauth-redirect-uri "http://127.0.0.1:8765/callback"
 ```
 
-## 通知系统
+## 📊 通知系统
 
 ### 通知方式
 
@@ -230,15 +253,23 @@ python main.py \
 - `--notify-level minimal`：仅关键通知（任务开始/完成）
 - `--notify-level normal`：按文件通知（默认）
 
-## 缓存与 Git 策略
+## 📈 并发调优建议
+
+1. `--max-workers`（多进程）建议范围：`2~4`。飞书 API 在更高并发下更容易出现 `1770006 schema mismatch` 或抖动。
+2. `--chunk-workers`（线程）用于单文档分片计算，建议按 CPU 调整：`min(逻辑核数, 8)` 起步。
+3. 出现写入异常时优先下调 `--max-workers`，再调整 `--chunk-workers`。
+4. 实战建议组合：`(2, 4)`、`(3, 4)`、`(4, 6)`，分别对应 `max-workers/chunk-workers`。
+5. 每次运行都会生成独立日志：`logs/knowledge_generator_<timestamp>_<pid>.log`，并自动仅保留最近 8 份。
+
+## 💾 缓存与 Git 策略
 
 - **用户 Token 缓存**：默认路径 `cache/user_token.json`
 - **Git 忽略**：`cache/` 和 `.env` 已在 `.gitignore`
 - **临时文件**：`.gitkeep` 文件已被忽略（`*.gitkeep`）
 
-## 表格处理优化
+## 📝 表格处理优化
 
-**📝 说明**：飞书 API 对表格块有严格的参数限制，我们实现了以下优化：
+**📋 说明**：飞书 API 对表格块有严格的参数限制，我们实现了以下优化：
 
 ```python
 # 在 write_markdown_by_block_matching 方法中
@@ -252,20 +283,20 @@ if segment.kind == "table":
 
 **✅ 效果**：表格块现在直接转换为文本块，避免了 API 参数不合法错误。
 
-## 测试命令
+## 🔬 测试命令
 
 ```bash
-# 运行所有测试（使用 conda 环境）
-conda run -n knowledge_generator python -m pytest tests/ -v
+# 运行所有测试
+python -m pytest tests/ -v
 
 # 运行特定测试文件
-conda run -n knowledge_generator python -m pytest tests/test_feishu_api.py -v
+python -m pytest tests/test_feishu_api.py -v
 
 # 运行特定测试类
-conda run -n knowledge_generator python -m pytest tests/test_feishu_api.py::TestFeishuApiOptimizations -v
+python -m pytest tests/test_feishu_api.py::TestFeishuApiOptimizations -v
 ```
 
-## 常见问题
+## 🐛 常见问题
 
 ### 1. 表格导入失败
 
@@ -301,7 +332,16 @@ conda run -n knowledge_generator python -m pytest tests/test_feishu_api.py::Test
 - 尝试使用代理
 - 程序会自动尝试 `gh-proxy` 回退
 
-## 退出码说明
+### 5. 并发开启后出现 `schema mismatch` 或“看起来卡住”
+
+**问题**：开启多进程后返回 `1770006 schema mismatch`，或终端一段时间无明显输出
+
+**解决方案**：
+- 优先将 `--max-workers` 调低到 `2` 或 `3`
+- 将 `--chunk-workers` 设为 `CPU 逻辑核数` 或更低
+- 查看 `logs/` 下最新日志文件，关注 `group submitted/group finished/group failed` 关键字
+
+## 📊 退出码说明
 
 | 代码 | 含义 | 说明 |
 |------|------|------|
@@ -309,7 +349,7 @@ conda run -n knowledge_generator python -m pytest tests/test_feishu_api.py::Test
 | `1` | 错误 | 参数错误或运行期致命错误 |
 | `2` | 部分失败 | 任务完成但存在失败文件 |
 
-## 开发说明
+## 🛠️ 开发说明
 
 ### 代码风格
 
@@ -322,13 +362,9 @@ conda run -n knowledge_generator python -m pytest tests/test_feishu_api.py::Test
 ```bash
 # 安装依赖
 pip install -r requirements.txt
-
-# 或使用 conda
-conda install -n knowledge_generator pip
-conda run -n knowledge_generator pip install -r requirements.txt
 ```
 
-## 技术架构
+## 🏗️ 技术架构
 
 ```
 ┌──────────────────────┐
@@ -360,7 +396,7 @@ conda run -n knowledge_generator pip install -r requirements.txt
 └──────────────────────┘
 ```
 
-## 下一步计划
+## 📅 下一步计划
 
 - [ ] 支持更多文档格式（PDF、Word）
 - [ ] 实现增量同步功能

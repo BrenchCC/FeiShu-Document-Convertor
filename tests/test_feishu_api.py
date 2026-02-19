@@ -58,6 +58,8 @@ class FakeHttpClient:
         self.fail_once_invalid_token = False
         self.fail_once_folder_contention = False
         self.fail_convert = False
+        self.fail_once_schema_mismatch_children = False
+        self.fail_once_schema_mismatch_descendant = False
         self.folder_children = {
             "fld_root": [
                 {
@@ -167,6 +169,14 @@ class FakeHttpClient:
                 }
             )
         if "/open-apis/docx/v1/documents/" in url and "/descendant" in url:
+            if self.fail_once_schema_mismatch_descendant:
+                self.fail_once_schema_mismatch_descendant = False
+                return FakeResponse(
+                    {
+                        "code": 1770006,
+                        "msg": "schema mismatch"
+                    }
+                )
             return FakeResponse(
                 {
                     "code": 0,
@@ -182,6 +192,23 @@ class FakeHttpClient:
                                 "block_id": "blk_img_1"
                             }
                         ]
+                    }
+                }
+            )
+        if "/open-apis/docx/v1/documents/" in url and "/children" in url:
+            if self.fail_once_schema_mismatch_children:
+                self.fail_once_schema_mismatch_children = False
+                return FakeResponse(
+                    {
+                        "code": 1770006,
+                        "msg": "schema mismatch"
+                    }
+                )
+            return FakeResponse(
+                {
+                    "code": 0,
+                    "data": {
+                        "children": []
                     }
                 }
             )
@@ -386,6 +413,141 @@ class TestFeishuApiOptimizations(unittest.TestCase):
             if "/open-apis/docx/v1/documents/blocks/convert" in call.get("url", "")
         ]
         self.assertGreaterEqual(len(convert_calls), 3)
+
+    def test_write_markdown_by_semantic_blocks_with_chunk_workers(self) -> None:
+        """Chunk worker option should keep stable semantic block write behavior.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_x",
+            convert_max_bytes = 4000,
+            chunk_workers = 4
+        )
+        self.assertEqual(doc_writer.chunk_workers, 4)
+
+        markdown = (
+            "# Title\n\n"
+            "Paragraph with **bold**.\n\n"
+            "```python\n"
+            "print('x')\n"
+            "```\n"
+        )
+        doc_writer.write_markdown_with_fallback(
+            document_id = "doc_x",
+            content = markdown
+        )
+
+        convert_calls = [
+            call for call in http_client.calls
+            if "/open-apis/docx/v1/documents/blocks/convert" in call.get("url", "")
+        ]
+        self.assertGreaterEqual(len(convert_calls), 2)
+        convert_contents = [
+            call.get("json_body", {}).get("content", "")
+            for call in convert_calls
+        ]
+        self.assertIn("# Title", convert_contents[0])
+        self.assertIn("print('x')", "".join(convert_contents))
+
+    def test_native_children_retry_on_schema_mismatch(self) -> None:
+        """Native children append should retry when API returns schema mismatch once.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        http_client.fail_once_schema_mismatch_children = True
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_x"
+        )
+
+        doc_writer.write_markdown_by_native_blocks(
+            document_id = "doc_x",
+            content = "# Title"
+        )
+
+        children_calls = [
+            call for call in http_client.calls
+            if "/open-apis/docx/v1/documents/" in call.get("url", "")
+            and "/children" in call.get("url", "")
+        ]
+        self.assertGreaterEqual(len(children_calls), 2)
+
+    def test_descendant_retry_on_schema_mismatch(self) -> None:
+        """Descendant append should retry when API returns schema mismatch once.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        http_client.fail_once_schema_mismatch_descendant = True
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_x"
+        )
+
+        doc_writer.convert_markdown(
+            document_id = "doc_x",
+            content = "hello world"
+        )
+
+        descendant_calls = [
+            call for call in http_client.calls
+            if "/open-apis/docx/v1/documents/" in call.get("url", "")
+            and "/descendant" in call.get("url", "")
+        ]
+        self.assertGreaterEqual(len(descendant_calls), 2)
+
+    def test_relative_link_downgraded_in_native_inline_parser(self) -> None:
+        """Relative markdown links should be downgraded to plain text for native blocks.
+
+        Args:
+            self: Test case instance.
+        """
+
+        http_client = FakeHttpClient()
+        doc_writer = DocWriterService(
+            auth_client = FakeAuthClient(),
+            http_client = http_client,
+            base_url = "https://open.feishu.cn",
+            folder_token = "fld_x"
+        )
+
+        elements = doc_writer._build_text_elements_from_markdown(
+            text = "See [local](./a.md) and [web](https://example.com)."
+        )
+        local_runs = [
+            element.get("text_run", {})
+            for element in elements
+            if element.get("text_run", {}).get("content") == "local"
+        ]
+        web_runs = [
+            element.get("text_run", {})
+            for element in elements
+            if element.get("text_run", {}).get("content") == "web"
+        ]
+
+        self.assertTrue(local_runs)
+        self.assertTrue(web_runs)
+        self.assertNotIn("text_element_style", local_runs[0])
+        self.assertEqual(
+            web_runs[0].get("text_element_style", {}).get("link", {}).get("url"),
+            "https://example.com"
+        )
 
     def test_native_block_fallback_when_convert_fails(self) -> None:
         """Convert failure should fallback to native blocks instead of raw markdown.

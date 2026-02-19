@@ -9,6 +9,7 @@ from typing import Protocol
 
 from data.models import DocumentPlanItem
 from data.models import ImportManifest
+from data.models import ImportSkipped
 from data.source_adapters import SourceAdapter
 
 
@@ -70,6 +71,7 @@ class OrchestrationPlanner:
 
     MD_LINK_PATTERN = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
     INDEX_STEMS = {"readme", "index", "table_of_contents", "toc"}
+    ROOT_FILTER_STEMS = {"readme", "index"}
 
     def __init__(
         self,
@@ -108,21 +110,54 @@ class OrchestrationPlanner:
         if not normalized_paths:
             return ImportManifest(items = [])
 
+        skipped_items: list[ImportSkipped] = []
+        filtered_root_paths: list[str] = []
+        effective_paths: list[str] = []
+        for path in normalized_paths:
+            if self._is_root_filtered_path(path = path):
+                filtered_root_paths.append(path)
+                skipped_items.append(
+                    ImportSkipped(
+                        path = path,
+                        reason = "root_readme_filtered"
+                    )
+                )
+                continue
+            effective_paths.append(path)
+
+        if not effective_paths:
+            return ImportManifest(
+                items = [],
+                skipped_items = skipped_items
+            )
+
         if structure_order != "toc_first":
-            return self._build_path_manifest(paths = normalized_paths)
+            return self._build_path_manifest(
+                paths = effective_paths,
+                skipped_items = skipped_items
+            )
 
         toc_content, toc_path = self._load_toc_content(
-            markdown_paths = normalized_paths,
+            markdown_paths = effective_paths,
             toc_file = toc_file
         )
         if not toc_content:
-            return self._build_path_manifest(paths = normalized_paths)
+            return self._build_path_manifest(
+                paths = effective_paths,
+                skipped_items = skipped_items
+            )
 
         toc_links = self._parse_toc_links(toc_content = toc_content)
         if not toc_links:
-            return self._build_path_manifest(paths = normalized_paths)
+            return self._build_path_manifest(
+                paths = effective_paths,
+                skipped_items = skipped_items
+            )
 
-        path_lookup, basename_lookup = self._build_path_lookup(paths = normalized_paths)
+        path_lookup, basename_lookup = self._build_path_lookup(paths = effective_paths)
+        filtered_root_lookup = {
+            path.lower(): path for path in filtered_root_paths
+        }
         toc_dir = posixpath.dirname(toc_path)
         toc_lines = toc_content.splitlines()
 
@@ -136,6 +171,19 @@ class OrchestrationPlanner:
         ambiguous_count = 0
 
         for link in toc_links:
+            normalized_target = self._normalize_link_target(
+                target = link.raw_target,
+                toc_dir = toc_dir
+            )
+            if normalized_target and normalized_target.lower() in filtered_root_lookup:
+                skipped_items.append(
+                    ImportSkipped(
+                        path = filtered_root_lookup[normalized_target.lower()],
+                        reason = "root_readme_filtered"
+                    )
+                )
+                continue
+
             candidate_paths = self._resolve_link_candidates(
                 raw_target = link.raw_target,
                 toc_dir = toc_dir,
@@ -219,7 +267,7 @@ class OrchestrationPlanner:
                     )
                 )
 
-        for path in normalized_paths:
+        for path in effective_paths:
             if path in seen_paths:
                 continue
             ordered_paths.append(path)
@@ -242,21 +290,30 @@ class OrchestrationPlanner:
             toc_links = len(toc_links),
             matched_links = matched_links,
             ambiguous_links = ambiguous_count,
-            fallback_count = len(unresolved_lines)
+            fallback_count = len(unresolved_lines),
+            skipped_items = skipped_items
         )
 
-    def _build_path_manifest(self, paths: list[str]) -> ImportManifest:
+    def _build_path_manifest(
+        self,
+        paths: list[str],
+        skipped_items: Optional[list[ImportSkipped]] = None
+    ) -> ImportManifest:
         """Build simple path-sorted manifest without TOC parsing.
 
         Args:
             paths: Normalized source-relative markdown paths.
+            skipped_items: Optional skipped import items.
         """
 
         items = [
             self._build_plan_item(path = path, order = index)
             for index, path in enumerate(sorted(paths))
         ]
-        return ImportManifest(items = items)
+        return ImportManifest(
+            items = items,
+            skipped_items = skipped_items or []
+        )
 
     def _build_plan_item(self, path: str, order: int, toc_label: str = "") -> DocumentPlanItem:
         """Create one document plan item.
@@ -455,3 +512,16 @@ class OrchestrationPlanner:
         if normalized.startswith("../"):
             return ""
         return normalized
+
+    def _is_root_filtered_path(self, path: str) -> bool:
+        """Check whether source path should be filtered by root README/index rule.
+
+        Args:
+            path: Normalized source-relative path.
+        """
+
+        normalized = (path or "").strip().replace("\\", "/").strip("/")
+        if "/" in normalized:
+            return False
+        stem = posixpath.splitext(normalized)[0].lower()
+        return stem in self.ROOT_FILTER_STEMS

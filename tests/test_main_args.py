@@ -41,6 +41,8 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.folder_subdirs, False)
         self.assertEqual(args.folder_root_subdir, True)
         self.assertEqual(args.folder_root_subdir_name, "")
+        self.assertEqual(args.max_workers, 1)
+        self.assertEqual(args.chunk_workers, 2)
 
     def test_parse_github(self) -> None:
         """Should parse github source arguments.
@@ -72,6 +74,8 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.folder_subdirs, False)
         self.assertEqual(args.folder_root_subdir, True)
         self.assertEqual(args.folder_root_subdir_name, "")
+        self.assertEqual(args.max_workers, 1)
+        self.assertEqual(args.chunk_workers, 2)
 
     def test_parse_wiki_with_space_id(self) -> None:
         """Should parse wiki mode with existing space id.
@@ -240,6 +244,48 @@ class TestMainArgs(unittest.TestCase):
 
         self.assertEqual(args.folder_root_subdir, False)
         self.assertEqual(args.folder_root_subdir_name, "batch_demo")
+
+    def test_parse_chunk_workers_option(self) -> None:
+        """Should parse chunk worker option.
+
+        Args:
+            self: Test case instance.
+        """
+
+        argv = [
+            "prog",
+            "--source",
+            "local",
+            "--path",
+            "./docs",
+            "--chunk-workers",
+            "4"
+        ]
+        with mock.patch("sys.argv", argv):
+            args = parse_args()
+
+        self.assertEqual(args.chunk_workers, 4)
+
+    def test_parse_max_workers_option(self) -> None:
+        """Should parse max worker option.
+
+        Args:
+            self: Test case instance.
+        """
+
+        argv = [
+            "prog",
+            "--source",
+            "local",
+            "--path",
+            "./docs",
+            "--max-workers",
+            "3"
+        ]
+        with mock.patch("sys.argv", argv):
+            args = parse_args()
+
+        self.assertEqual(args.max_workers, 3)
 
 
 if __name__ == "__main__":

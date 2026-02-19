@@ -123,6 +123,85 @@ class OpenAICompatibleLlmClient:
             reason = reason
         )
 
+    def generate_folder_nav_markdown(
+        self,
+        context_markdown: str,
+        documents: list[dict[str, str]]
+    ) -> str:
+        """Generate one folder navigation markdown by LLM.
+
+        Args:
+            context_markdown: Root README/TOC markdown context.
+            documents: Created document items with source path and metadata.
+        """
+
+        if not self.is_ready():
+            return ""
+        if not documents:
+            return ""
+
+        endpoint = self.base_url
+        if not endpoint.endswith("/chat/completions"):
+            endpoint = f"{endpoint}/chat/completions"
+
+        payload_docs = []
+        for item in documents[:500]:
+            payload_docs.append(
+                {
+                    "path": str(item.get("path", "")).strip(),
+                    "title": str(item.get("title", "")).strip(),
+                    "relative_dir": str(item.get("relative_dir", "")).strip(),
+                    "toc_label": str(item.get("toc_label", "")).strip()
+                }
+            )
+
+        prompt_payload = {
+            "context_markdown": context_markdown[:12000],
+            "documents": payload_docs
+        }
+
+        try:
+            response = self.http_client.request(
+                method = "POST",
+                url = endpoint,
+                headers = {
+                    "Authorization": f"Bearer {self.api_key}"
+                },
+                json_body = {
+                    "model": self.model,
+                    "temperature": 0.1,
+                    "max_tokens": 1500,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You generate one Markdown navigation document. "
+                                "Use heading + bullet structure. "
+                                "Every bullet link target must be one source path from documents.path. "
+                                "Do not output code fences. "
+                                "Output Markdown only."
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                prompt_payload,
+                                ensure_ascii = False
+                            )
+                        }
+                    ]
+                }
+            )
+            payload = response.json()
+        except Exception as exc:
+            logger.warning("LLM request failed for folder nav generation: %s", str(exc))
+            return ""
+
+        content = self._extract_message_content(payload = payload)
+        if not content:
+            return ""
+        return self._strip_markdown_fence(text = content).strip()
+
     def _extract_message_content(self, payload: dict[str, Any]) -> str:
         """Extract assistant message content from OpenAI-compatible payload.
 
@@ -194,3 +273,22 @@ class OpenAICompatibleLlmClient:
         if parsed > 1.0:
             return 1.0
         return parsed
+
+    def _strip_markdown_fence(self, text: str) -> str:
+        """Strip wrapped markdown code fence from model output.
+
+        Args:
+            text: Raw model output text.
+        """
+
+        value = (text or "").strip()
+        if not value.startswith("```"):
+            return value
+
+        lines = value.splitlines()
+        if len(lines) >= 2 and lines[0].strip().startswith("```"):
+            body = lines[1:]
+            if body and body[-1].strip().startswith("```"):
+                body = body[:-1]
+            return "\n".join(body).strip()
+        return value

@@ -1,28 +1,311 @@
+import dataclasses
 import logging
+import multiprocessing
 import os
+import posixpath
 import re
 import urllib.parse
 import datetime
 
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import as_completed
+from typing import Any
 from typing import Optional
 
 from config.config import AppConfig
 from core.orchestration_planner import OrchestrationPlanner
 from integrations.feishu_api import DocWriterService
+from integrations.feishu_api import FeishuAuthClient
 from integrations.feishu_api import MediaService
 from integrations.feishu_api import WikiService
 from data.models import AssetRef
 from data.models import CreatedDocRecord
-from data.models import DocumentPlanItem
 from data.models import ImportFailure
 from data.models import ImportManifest
 from data.models import ImportResult
 from data.models import SourceDocument
 from data.source_adapters import SourceAdapter
+from utils.http_client import HttpClient
 from utils.markdown_processor import MarkdownProcessor
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_worker_log_handler() -> None:
+    """Attach one stream handler for worker process when root logger is empty.
+
+    Args:
+        None
+    """
+
+    root_logger = logging.getLogger()
+    formatter = logging.Formatter(
+        fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+    has_stream_handler = any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in root_logger.handlers
+    )
+    if not has_stream_handler:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        root_logger.addHandler(stream_handler)
+
+    log_file_path = os.environ.get("KNOWLEDGE_GENERATOR_LOG_PATH", "").strip()
+    if log_file_path:
+        expected_path = os.path.abspath(log_file_path)
+        has_file_handler = any(
+            isinstance(handler, logging.FileHandler)
+            and os.path.abspath(getattr(handler, "baseFilename", "")) == expected_path
+            for handler in root_logger.handlers
+        )
+        if not has_file_handler:
+            try:
+                file_handler = logging.FileHandler(log_file_path, encoding = "utf-8")
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
+            except OSError:
+                pass
+
+    root_logger.setLevel(logging.INFO)
+
+
+class InMemorySourceAdapter(SourceAdapter):
+    """In-memory source adapter for worker-side grouped import."""
+
+    def __init__(
+        self,
+        docs_by_path: dict[str, SourceDocument],
+        ordered_paths: list[str]
+    ) -> None:
+        self.docs_by_path = docs_by_path
+        self.ordered_paths = ordered_paths
+
+    def list_markdown(self) -> list[str]:
+        """List markdown paths preserving given order.
+
+        Args:
+            self: Adapter instance.
+        """
+
+        return list(self.ordered_paths)
+
+    def read_markdown(self, relative_path: str) -> SourceDocument:
+        """Read one markdown document from memory map.
+
+        Args:
+            self: Adapter instance.
+            relative_path: Source-relative markdown path.
+        """
+
+        if relative_path not in self.docs_by_path:
+            raise FileNotFoundError(f"Missing in-memory markdown path: {relative_path}")
+        doc = self.docs_by_path[relative_path]
+        return SourceDocument(
+            path = doc.path,
+            title = doc.title,
+            markdown = doc.markdown,
+            assets = list(doc.assets),
+            relative_dir = doc.relative_dir,
+            base_ref = doc.base_ref,
+            source_type = doc.source_type
+        )
+
+
+def _process_group_worker(payload: dict[str, Any]) -> dict[str, Any]:
+    """Process one top-level folder group in a subprocess.
+
+    Args:
+        payload: Serializable worker payload.
+    """
+
+    _ensure_worker_log_handler()
+
+    group_key = str(payload.get("group_key", "__unknown__"))
+    config = AppConfig(**payload["config"])
+    docs_by_path: dict[str, SourceDocument] = {}
+    for raw_doc in payload.get("docs", []):
+        path = str(raw_doc.get("path", "")).strip()
+        if not path:
+            continue
+        docs_by_path[path] = SourceDocument(
+            path = path,
+            title = str(raw_doc.get("title", "")).strip() or posixpath.basename(path),
+            markdown = str(raw_doc.get("markdown", "")),
+            assets = [],
+            relative_dir = str(raw_doc.get("relative_dir", "")).strip(),
+            base_ref = str(raw_doc.get("base_ref", "")).strip(),
+            source_type = str(raw_doc.get("source_type", "")).strip() or "local"
+        )
+
+    ordered_paths = [path for path in payload.get("ordered_paths", []) if path in docs_by_path]
+    logger.info(
+        "worker group start: key = %s, docs = %d",
+        group_key,
+        len(ordered_paths)
+    )
+    source_adapter = InMemorySourceAdapter(
+        docs_by_path = docs_by_path,
+        ordered_paths = ordered_paths
+    )
+    markdown_processor = MarkdownProcessor()
+
+    http_client = HttpClient(
+        timeout = config.request_timeout,
+        max_retries = config.max_retries,
+        retry_backoff = config.retry_backoff
+    )
+    app_auth = FeishuAuthClient(
+        app_id = config.feishu_app_id,
+        app_secret = config.feishu_app_secret,
+        base_url = config.feishu_base_url,
+        http_client = http_client
+    )
+    doc_writer = DocWriterService(
+        auth_client = app_auth,
+        http_client = http_client,
+        base_url = config.feishu_base_url,
+        folder_token = config.feishu_folder_token if payload.get("write_mode") in {"folder", "both"} else "",
+        convert_max_bytes = config.feishu_convert_max_bytes,
+        chunk_workers = int(payload.get("chunk_workers", 2))
+    )
+    media_service = MediaService(
+        auth_client = app_auth,
+        http_client = http_client,
+        base_url = config.feishu_base_url
+    )
+
+    wiki_service = None
+    if payload.get("write_mode") in {"wiki", "both"}:
+        wiki_service = WikiService(
+            auth_client = app_auth,
+            http_client = http_client,
+            base_url = config.feishu_base_url,
+            user_access_token = config.feishu_user_access_token
+        )
+
+    orchestrator = ImportOrchestrator(
+        source_adapter = source_adapter,
+        markdown_processor = markdown_processor,
+        config = config,
+        doc_writer = doc_writer,
+        media_service = media_service,
+        wiki_service = wiki_service,
+        notify_service = None,
+        llm_client = None
+    )
+
+    success = 0
+    failures: list[dict[str, str]] = []
+    created_docs: list[dict[str, str]] = []
+    folder_token_by_path = payload.get("folder_token_by_path", {})
+    wiki_parent_by_path = payload.get("wiki_parent_by_path", {})
+    write_mode = str(payload.get("write_mode", "folder"))
+    space_id = str(payload.get("space_id", ""))
+
+    for index, path in enumerate(ordered_paths, start = 1):
+        try:
+            logger.info(
+                "worker processing: group = %s, progress = %d/%d, path = %s",
+                group_key,
+                index,
+                len(ordered_paths),
+                path
+            )
+            doc = source_adapter.read_markdown(relative_path = path)
+            processed = markdown_processor.extract_assets_and_math(
+                md_text = doc.markdown,
+                base_path_or_url = doc.base_ref
+            )
+            doc.assets = processed.assets
+            target_folder_token = str(folder_token_by_path.get(path, ""))
+            document_id, resolved_title, doc_url = orchestrator._create_doc_with_title_strategy(
+                doc = doc,
+                folder_token = target_folder_token
+            )
+            asset_lookup = orchestrator._build_asset_lookup(assets = doc.assets)
+
+            def _image_block_handler(image_url: str, block_id: str) -> None:
+                asset = orchestrator._find_asset_by_image_url(
+                    image_url = image_url,
+                    asset_lookup = asset_lookup
+                )
+                if not asset:
+                    return
+                file_token = media_service.upload_to_node(
+                    asset = asset,
+                    parent_node = block_id
+                )
+                doc_writer.replace_image(
+                    document_id = document_id,
+                    block_id = block_id,
+                    file_token = file_token
+                )
+
+            doc_writer.write_markdown_with_fallback(
+                document_id = document_id,
+                content = processed.markdown,
+                image_block_handler = _image_block_handler
+            )
+
+            wiki_node_token = ""
+            if write_mode in {"wiki", "both"} and wiki_service is not None:
+                parent_node_token = str(wiki_parent_by_path.get(path, ""))
+                wiki_node_token = wiki_service.move_doc_to_wiki(
+                    space_id = space_id,
+                    document_id = document_id,
+                    parent_node_token = parent_node_token,
+                    title = resolved_title
+                )
+
+            created_docs.append(
+                {
+                    "path": doc.path,
+                    "title": resolved_title,
+                    "document_id": document_id,
+                    "doc_url": doc_url,
+                    "wiki_node_token": wiki_node_token
+                }
+            )
+            success += 1
+            logger.info(
+                "worker done: group = %s, progress = %d/%d, path = %s, document_id = %s",
+                group_key,
+                index,
+                len(ordered_paths),
+                path,
+                document_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "worker failed: group = %s, progress = %d/%d, path = %s, err = %s",
+                group_key,
+                index,
+                len(ordered_paths),
+                path,
+                str(exc)
+            )
+            failures.append(
+                {
+                    "path": path,
+                    "reason": str(exc)
+                }
+            )
+
+    logger.info(
+        "worker group finish: key = %s, success = %d, failed = %d",
+        group_key,
+        success,
+        len(failures)
+    )
+    return {
+        "success": success,
+        "failures": failures,
+        "created_docs": created_docs
+    }
 
 
 class ImportOrchestrator:
@@ -79,7 +362,9 @@ class ImportOrchestrator:
         folder_nav_doc: bool = True,
         folder_nav_title: str = "00-导航总目录",
         llm_fallback: str = "toc_ambiguity",
-        llm_max_calls: int = 3
+        llm_max_calls: int = 3,
+        max_workers: int = 1,
+        chunk_workers: int = 2
     ) -> ImportResult:
         """Run import pipeline.
 
@@ -99,6 +384,8 @@ class ImportOrchestrator:
             folder_nav_title: Folder navigation document title.
             llm_fallback: LLM fallback strategy for TOC ambiguity.
             llm_max_calls: Maximum number of LLM calls in one run.
+            max_workers: Process worker count for grouped import.
+            chunk_workers: Thread worker count for per-document chunk planning.
         """
 
         paths = self.source_adapter.list_markdown()
@@ -110,6 +397,9 @@ class ImportOrchestrator:
             llm_max_calls = llm_max_calls
         )
         result = ImportResult(total = len(manifest.items))
+        if manifest.skipped_items:
+            result.skipped_items.extend(manifest.skipped_items)
+        result.skipped = len(result.skipped_items)
 
         logger.info("=" * 80)
         logger.info("Import task started")
@@ -139,6 +429,10 @@ class ImportOrchestrator:
             logger.warning("unresolved toc links: %d", len(manifest.unresolved_links))
             for unresolved in manifest.unresolved_links[:20]:
                 logger.warning("toc unresolved: %s", unresolved)
+        if manifest.skipped_items:
+            logger.info("manifest skipped items: %d", len(manifest.skipped_items))
+            for skipped in manifest.skipped_items[:20]:
+                logger.info("manifest skipped: path = %s, reason = %s", skipped.path, skipped.reason)
 
         self._notify(
             chat_id = chat_id,
@@ -152,6 +446,8 @@ class ImportOrchestrator:
 
         if not dry_run:
             self._assert_services_ready(write_mode = write_mode)
+            if hasattr(self.doc_writer, "chunk_workers"):
+                self.doc_writer.chunk_workers = max(1, int(chunk_workers))
             if write_mode in {"wiki", "both"}:
                 if space_id:
                     logger.info("Reuse existing wiki space_id = %s", space_id)
@@ -188,156 +484,180 @@ class ImportOrchestrator:
                 folder_root_token
             )
 
-        for index, plan_item in enumerate(manifest.items, start = 1):
-            path = plan_item.path
-            try:
-                doc = self.source_adapter.read_markdown(relative_path = path)
-                processed = self.markdown_processor.extract_assets_and_math(
-                    md_text = doc.markdown,
-                    base_path_or_url = doc.base_ref
-                )
-                doc.assets = processed.assets
-
-                logger.info("-" * 60)
-                logger.info("[%d/%d] Processing: %s", index, len(manifest.items), doc.path)
-                logger.info("assets = %d, formulas = %d", len(doc.assets), processed.formula_count)
-                logger.info("-" * 60)
-
-                self._notify(
-                    chat_id = chat_id,
-                    level = notify_level,
-                    message = f"正在写入：{doc.path} ({index}/{len(manifest.items)})",
-                    force = notify_level == "normal"
-                )
-                self._log_robot_push(
-                    stage = "processing",
-                    detail = f"path = {doc.path}, progress = {index}/{len(manifest.items)}"
-                )
-
-                if dry_run:
-                    result.success += 1
-                    continue
-
-                target_folder_token = folder_root_token
-                if write_mode in {"folder", "both"} and folder_subdirs:
-                    effective_relative_dir = doc.relative_dir
-                    if folder_root_relative_dir:
-                        if effective_relative_dir:
-                            effective_relative_dir = (
-                                f"{folder_root_relative_dir}/{effective_relative_dir}"
-                            )
-                        else:
-                            effective_relative_dir = folder_root_relative_dir
-                    target_folder_token = self.doc_writer.ensure_folder_path(
-                        relative_dir = effective_relative_dir
+        if max_workers > 1 and not dry_run and manifest.items:
+            parallel_outcome = self._run_grouped_multiprocess_import(
+                manifest = manifest,
+                write_mode = write_mode,
+                space_id = space_id,
+                folder_subdirs = folder_subdirs,
+                folder_root_relative_dir = folder_root_relative_dir,
+                folder_root_token = folder_root_token,
+                max_workers = max_workers,
+                chunk_workers = chunk_workers,
+                chat_id = chat_id,
+                notify_level = notify_level
+            )
+            created_docs.extend(parallel_outcome["created_docs"])
+            result.success += parallel_outcome["success"]
+            result.failures.extend(parallel_outcome["failures"])
+        else:
+            for index, plan_item in enumerate(manifest.items, start = 1):
+                path = plan_item.path
+                try:
+                    doc = self.source_adapter.read_markdown(relative_path = path)
+                    processed = self.markdown_processor.extract_assets_and_math(
+                        md_text = doc.markdown,
+                        base_path_or_url = doc.base_ref
                     )
+                    doc.assets = processed.assets
 
-                document_id, resolved_title, doc_url = self._create_doc_with_title_strategy(
-                    doc = doc,
-                    folder_token = target_folder_token
-                )
-                logger.info(
-                    "created document_id = %s, title = %s, folder_token = %s, url = %s",
-                    document_id,
-                    resolved_title,
-                    target_folder_token or getattr(self.doc_writer, "folder_token", ""),
-                    doc_url
-                )
-                self._log_robot_push(
-                    stage = "doc_created",
-                    detail = (
-                        f"path = {doc.path}, title = {resolved_title}, document_id = {document_id}, "
-                        f"folder_token = {target_folder_token or getattr(self.doc_writer, 'folder_token', '')}"
-                    )
-                )
-                asset_lookup = self._build_asset_lookup(assets = doc.assets)
+                    logger.info("-" * 60)
+                    logger.info("[%d/%d] Processing: %s", index, len(manifest.items), doc.path)
+                    logger.info("assets = %d, formulas = %d", len(doc.assets), processed.formula_count)
+                    logger.info("-" * 60)
 
-                def _image_block_handler(image_url: str, block_id: str) -> None:
-                    asset = self._find_asset_by_image_url(
-                        image_url = image_url,
-                        asset_lookup = asset_lookup
-                    )
-                    if not asset:
-                        logger.warning(
-                            "No local asset mapping for image url = %s in document = %s",
-                            image_url,
-                            doc.path
-                        )
-                        return
-
-                    file_token = self.media_service.upload_to_node(
-                        asset = asset,
-                        parent_node = block_id
-                    )
-                    self.doc_writer.replace_image(
-                        document_id = document_id,
-                        block_id = block_id,
-                        file_token = file_token
-                    )
-
-                self.doc_writer.write_markdown_with_fallback(
-                    document_id = document_id,
-                    content = processed.markdown,
-                    image_block_handler = _image_block_handler
-                )
-
-                wiki_node_token = ""
-                if write_mode in {"wiki", "both"}:
-                    parent_node_token = self.wiki_service.ensure_path_nodes(
-                        space_id = space_id,
-                        relative_dir = doc.relative_dir
-                    )
-                    wiki_node_token = self.wiki_service.move_doc_to_wiki(
-                        space_id = space_id,
-                        document_id = document_id,
-                        parent_node_token = parent_node_token,
-                        title = resolved_title
+                    self._notify(
+                        chat_id = chat_id,
+                        level = notify_level,
+                        message = f"正在写入：{doc.path} ({index}/{len(manifest.items)})",
+                        force = notify_level == "normal"
                     )
                     self._log_robot_push(
-                        stage = "wiki_moved",
+                        stage = "processing",
+                        detail = f"path = {doc.path}, progress = {index}/{len(manifest.items)}"
+                    )
+
+                    if dry_run:
+                        result.success += 1
+                        continue
+
+                    target_folder_token = folder_root_token
+                    if write_mode in {"folder", "both"} and folder_subdirs:
+                        effective_relative_dir = doc.relative_dir
+                        if folder_root_relative_dir:
+                            if effective_relative_dir:
+                                effective_relative_dir = (
+                                    f"{folder_root_relative_dir}/{effective_relative_dir}"
+                                )
+                            else:
+                                effective_relative_dir = folder_root_relative_dir
+                        target_folder_token = self.doc_writer.ensure_folder_path(
+                            relative_dir = effective_relative_dir
+                        )
+
+                    document_id, resolved_title, doc_url = self._create_doc_with_title_strategy(
+                        doc = doc,
+                        folder_token = target_folder_token
+                    )
+                    logger.info(
+                        "created document_id = %s, title = %s, folder_token = %s, url = %s",
+                        document_id,
+                        resolved_title,
+                        target_folder_token or getattr(self.doc_writer, "folder_token", ""),
+                        doc_url
+                    )
+                    self._log_robot_push(
+                        stage = "doc_created",
                         detail = (
-                            f"path = {doc.path}, document_id = {document_id}, "
-                            f"wiki_node_token = {wiki_node_token}"
+                            f"path = {doc.path}, title = {resolved_title}, document_id = {document_id}, "
+                            f"folder_token = {target_folder_token or getattr(self.doc_writer, 'folder_token', '')}"
+                        )
+                    )
+                    asset_lookup = self._build_asset_lookup(assets = doc.assets)
+
+                    def _image_block_handler(image_url: str, block_id: str) -> None:
+                        asset = self._find_asset_by_image_url(
+                            image_url = image_url,
+                            asset_lookup = asset_lookup
+                        )
+                        if not asset:
+                            logger.warning(
+                                "No local asset mapping for image url = %s in document = %s",
+                                image_url,
+                                doc.path
+                            )
+                            return
+
+                        file_token = self.media_service.upload_to_node(
+                            asset = asset,
+                            parent_node = block_id
+                        )
+                        self.doc_writer.replace_image(
+                            document_id = document_id,
+                            block_id = block_id,
+                            file_token = file_token
+                        )
+
+                    self.doc_writer.write_markdown_with_fallback(
+                        document_id = document_id,
+                        content = processed.markdown,
+                        image_block_handler = _image_block_handler
+                    )
+
+                    wiki_node_token = ""
+                    if write_mode in {"wiki", "both"}:
+                        parent_node_token = self.wiki_service.ensure_path_nodes(
+                            space_id = space_id,
+                            relative_dir = doc.relative_dir
+                        )
+                        wiki_node_token = self.wiki_service.move_doc_to_wiki(
+                            space_id = space_id,
+                            document_id = document_id,
+                            parent_node_token = parent_node_token,
+                            title = resolved_title
+                        )
+                        self._log_robot_push(
+                            stage = "wiki_moved",
+                            detail = (
+                                f"path = {doc.path}, document_id = {document_id}, "
+                                f"wiki_node_token = {wiki_node_token}"
+                            )
+                        )
+
+                    created_docs.append(
+                        CreatedDocRecord(
+                            path = doc.path,
+                            title = resolved_title,
+                            document_id = document_id,
+                            doc_url = doc_url,
+                            wiki_node_token = wiki_node_token
                         )
                     )
 
-                created_docs.append(
-                    CreatedDocRecord(
-                        path = doc.path,
-                        title = resolved_title,
-                        document_id = document_id,
-                        doc_url = doc_url,
-                        wiki_node_token = wiki_node_token
+                    result.success += 1
+                    self._notify(
+                        chat_id = chat_id,
+                        level = notify_level,
+                        message = f"写入完成：{doc.path}",
+                        force = notify_level == "normal"
                     )
-                )
-
-                result.success += 1
-                self._notify(
-                    chat_id = chat_id,
-                    level = notify_level,
-                    message = f"写入完成：{doc.path}",
-                    force = notify_level == "normal"
-                )
-            except Exception as exc:
-                logger.exception("Failed to process %s", path)
-                self._log_robot_push(
-                    stage = "failed",
-                    detail = f"path = {path}, error = {str(exc)[:240]}"
-                )
-                result.failures.append(
-                    ImportFailure(
-                        path = path,
-                        reason = str(exc)
+                except Exception as exc:
+                    logger.exception("Failed to process %s", path)
+                    self._log_robot_push(
+                        stage = "failed",
+                        detail = f"path = {path}, error = {str(exc)[:240]}"
                     )
-                )
-                self._notify(
-                    chat_id = chat_id,
-                    level = notify_level,
-                    message = f"写入失败：{path}，原因：{str(exc)[:300]}",
-                    force = True
-                )
+                    result.failures.append(
+                        ImportFailure(
+                            path = path,
+                            reason = str(exc)
+                        )
+                    )
+                    self._notify(
+                        chat_id = chat_id,
+                        level = notify_level,
+                        message = f"写入失败：{path}，原因：{str(exc)[:300]}",
+                        force = True
+                    )
 
+        order_map = {item.path: index for index, item in enumerate(manifest.items)}
+        created_docs = sorted(
+            created_docs,
+            key = lambda item: order_map.get(item.path, 10 ** 9)
+        )
+        result.created_docs = list(created_docs)
         result.failed = len(result.failures)
+        result.skipped = len(result.skipped_items)
 
         if (
             not dry_run
@@ -345,26 +665,42 @@ class ImportOrchestrator:
             and write_mode in {"folder", "both"}
             and created_docs
         ):
-            self._write_folder_navigation_doc(
-                folder_nav_title = folder_nav_title,
-                manifest = manifest,
-                created_docs = created_docs,
-                folder_token = folder_root_token
-            )
+            if folder_subdirs:
+                nav_created = self._write_folder_navigation_doc_with_llm(
+                    folder_nav_title = folder_nav_title,
+                    manifest = manifest,
+                    created_docs = created_docs,
+                    folder_token = folder_root_token,
+                    source_paths = paths,
+                    toc_file = toc_file
+                )
+                if not nav_created:
+                    logger.warning(
+                        "Skip folder navigation doc: LLM generation unavailable or invalid output"
+                    )
+            else:
+                self._write_folder_navigation_doc(
+                    folder_nav_title = folder_nav_title,
+                    manifest = manifest,
+                    created_docs = created_docs,
+                    folder_token = folder_root_token
+                )
 
         logger.info("*" * 50)
         logger.info(
-            "Import finished: total = %d, success = %d, failed = %d",
+            "Import finished: total = %d, success = %d, failed = %d, skipped = %d",
             result.total,
             result.success,
-            result.failed
+            result.failed,
+            result.skipped
         )
         logger.info("*" * 50)
         self._log_robot_push(
             stage = "finished",
             detail = (
                 f"total = {result.total}, success = {result.success}, failed = {result.failed}, "
-                f"llm_calls = {manifest.llm_calls}, unresolved = {len(manifest.unresolved_links)}"
+                f"skipped = {result.skipped}, llm_calls = {manifest.llm_calls}, "
+                f"unresolved = {len(manifest.unresolved_links)}"
             )
         )
 
@@ -373,6 +709,7 @@ class ImportOrchestrator:
             f"total = {result.total}",
             f"success = {result.success}",
             f"failed = {result.failed}",
+            f"skipped = {result.skipped}",
             (
                 "编排统计："
                 f"toc_links = {manifest.toc_links}, "
@@ -390,6 +727,10 @@ class ImportOrchestrator:
             summary_lines.append("失败清单：")
             for failure in result.failures[:20]:
                 summary_lines.append(f"- {failure.path}: {failure.reason[:120]}")
+        if result.skipped_items:
+            summary_lines.append("跳过清单：")
+            for skipped in result.skipped_items[:20]:
+                summary_lines.append(f"- {skipped.path}: {skipped.reason[:120]}")
 
         self._notify(
             chat_id = chat_id,
@@ -429,23 +770,740 @@ class ImportOrchestrator:
             llm_fallback = llm_fallback,
             llm_max_calls = llm_max_calls
         )
-
-        if not manifest.items:
-            manifest.items = [
-                DocumentPlanItem(
-                    path = path,
-                    order = index,
-                    is_index = self._is_directory_index(path = path),
-                    relative_dir = (
-                        ""
-                        if os.path.dirname(path).replace("\\", "/") == "."
-                        else os.path.dirname(path).replace("\\", "/")
-                    ),
-                    toc_label = ""
-                )
-                for index, path in enumerate(sorted(paths))
-            ]
         return manifest
+
+    def _run_grouped_multiprocess_import(
+        self,
+        manifest: ImportManifest,
+        write_mode: str,
+        space_id: str,
+        folder_subdirs: bool,
+        folder_root_relative_dir: str,
+        folder_root_token: str,
+        max_workers: int,
+        chunk_workers: int,
+        chat_id: str,
+        notify_level: str
+    ) -> dict[str, Any]:
+        """Run grouped multiprocessing import by top-level folder key.
+
+        Args:
+            manifest: Ordered import manifest.
+            write_mode: Write mode, one of folder/wiki/both.
+            space_id: Resolved wiki space id.
+            folder_subdirs: Whether folder hierarchy mode is enabled.
+            folder_root_relative_dir: Optional task root folder name.
+            folder_root_token: Optional task root folder token.
+            max_workers: Process pool size.
+            chunk_workers: Per-document chunk planning thread count.
+            chat_id: Notification target chat id.
+            notify_level: Notification verbosity.
+        """
+
+        logger.info(
+            "grouped import start: workers = %d, chunk_workers = %d, planned_docs = %d",
+            max_workers,
+            chunk_workers,
+            len(manifest.items)
+        )
+        self._log_robot_push(
+            stage = "grouped_start",
+            detail = (
+                f"workers = {max_workers}, chunk_workers = {chunk_workers}, "
+                f"planned_docs = {len(manifest.items)}"
+            )
+        )
+        self._notify(
+            chat_id = chat_id,
+            level = notify_level,
+            message = (
+                f"并发导入启动：workers = {max_workers}，chunk_workers = {chunk_workers}，"
+                f"planned_docs = {len(manifest.items)}"
+            ),
+            force = notify_level == "normal"
+        )
+
+        snapshots, snapshot_failures = self._build_doc_snapshots(manifest = manifest)
+        usable_items = [item for item in manifest.items if item.path in snapshots]
+        logger.info(
+            "grouped snapshot ready: loaded = %d, failed = %d",
+            len(usable_items),
+            len(snapshot_failures)
+        )
+        self._log_robot_push(
+            stage = "grouped_snapshot_ready",
+            detail = f"loaded = {len(usable_items)}, failed = {len(snapshot_failures)}"
+        )
+        if not usable_items:
+            return {
+                "success": 0,
+                "failures": snapshot_failures,
+                "created_docs": []
+            }
+
+        folder_token_by_path = self._build_folder_token_by_path(
+            items = usable_items,
+            snapshots = snapshots,
+            write_mode = write_mode,
+            folder_subdirs = folder_subdirs,
+            folder_root_relative_dir = folder_root_relative_dir,
+            folder_root_token = folder_root_token
+        )
+        wiki_parent_by_path = self._build_wiki_parent_by_path(
+            items = usable_items,
+            snapshots = snapshots,
+            write_mode = write_mode,
+            space_id = space_id
+        )
+
+        grouped = self._group_items_by_top_dir(items = usable_items)
+        payloads = []
+        group_doc_counts: dict[str, int] = {}
+        config_payload = dataclasses.asdict(self.config)
+        for group_key, group_items in grouped:
+            ordered_paths = [item.path for item in group_items]
+            group_doc_counts[group_key] = len(ordered_paths)
+            logger.info(
+                "group dispatch prepared: key = %s, docs = %d",
+                group_key,
+                len(ordered_paths)
+            )
+            docs_payload = []
+            for path in ordered_paths:
+                doc = snapshots[path]
+                docs_payload.append(
+                    {
+                        "path": doc.path,
+                        "title": doc.title,
+                        "markdown": doc.markdown,
+                        "relative_dir": doc.relative_dir,
+                        "base_ref": doc.base_ref,
+                        "source_type": doc.source_type
+                    }
+                )
+            payloads.append(
+                {
+                    "group_key": group_key,
+                    "config": config_payload,
+                    "docs": docs_payload,
+                    "ordered_paths": ordered_paths,
+                    "write_mode": write_mode,
+                    "space_id": space_id,
+                    "folder_token_by_path": {
+                        path: folder_token_by_path.get(path, "")
+                        for path in ordered_paths
+                    },
+                    "wiki_parent_by_path": {
+                        path: wiki_parent_by_path.get(path, "")
+                        for path in ordered_paths
+                    },
+                    "chunk_workers": max(1, int(chunk_workers))
+                }
+            )
+
+        successes = 0
+        failures: list[ImportFailure] = list(snapshot_failures)
+        created_docs: list[CreatedDocRecord] = []
+        future_group_map = {}
+        total_groups = len(payloads)
+        finished_groups = 0
+        total_docs = len(usable_items)
+        finished_docs = 0
+
+        logger.info(
+            "grouped dispatch start: groups = %d, docs = %d, workers = %d",
+            total_groups,
+            total_docs,
+            max_workers
+        )
+        self._log_robot_push(
+            stage = "grouped_dispatch_start",
+            detail = f"groups = {total_groups}, docs = {total_docs}, workers = {max_workers}"
+        )
+
+        executor = ProcessPoolExecutor(
+            max_workers = max_workers,
+            mp_context = multiprocessing.get_context("spawn")
+        )
+        try:
+            for payload in payloads:
+                future = executor.submit(_process_group_worker, payload)
+                future_group_map[future] = payload["group_key"]
+                logger.info(
+                    "group submitted: key = %s, docs = %d",
+                    payload["group_key"],
+                    len(payload.get("ordered_paths", []))
+                )
+                self._log_robot_push(
+                    stage = "group_submitted",
+                    detail = (
+                        f"group = {payload['group_key']}, docs = {len(payload.get('ordered_paths', []))}"
+                    )
+                )
+                self._notify(
+                    chat_id = chat_id,
+                    level = notify_level,
+                    message = (
+                        f"分组已提交：{payload['group_key']}，"
+                        f"docs = {len(payload.get('ordered_paths', []))}"
+                    ),
+                    force = notify_level == "normal"
+                )
+
+            for future in as_completed(future_group_map):
+                group_key = str(future_group_map[future])
+                group_doc_total = int(group_doc_counts.get(group_key, 0))
+                try:
+                    worker_result = future.result()
+                except Exception as exc:
+                    finished_groups += 1
+                    finished_docs += group_doc_total
+                    logger.exception(
+                        "group failed: key = %s, docs = %d, progress = %d/%d groups, %d/%d docs",
+                        group_key,
+                        group_doc_total,
+                        finished_groups,
+                        total_groups,
+                        finished_docs,
+                        total_docs
+                    )
+                    self._log_robot_push(
+                        stage = "group_failed",
+                        detail = (
+                            f"group = {group_key}, docs = {group_doc_total}, error = {str(exc)[:240]}, "
+                            f"group_progress = {finished_groups}/{total_groups}, "
+                            f"doc_progress = {finished_docs}/{total_docs}"
+                        )
+                    )
+                    self._notify(
+                        chat_id = chat_id,
+                        level = notify_level,
+                        message = (
+                            f"分组失败：{group_key}，docs = {group_doc_total}，error = {str(exc)[:180]}，"
+                            f"进度：groups {finished_groups}/{total_groups}，docs {finished_docs}/{total_docs}"
+                        ),
+                        force = True
+                    )
+                    failures.append(
+                        ImportFailure(
+                            path = f"group:{group_key}",
+                            reason = str(exc)
+                        )
+                    )
+                    continue
+
+                group_success = int(worker_result.get("success", 0))
+                group_failures = worker_result.get("failures", [])
+                finished_groups += 1
+                finished_docs += max(group_doc_total, group_success + len(group_failures))
+                successes += group_success
+
+                logger.info(
+                    (
+                        "group finished: key = %s, success = %d, failed = %d, "
+                        "progress = %d/%d groups, %d/%d docs"
+                    ),
+                    group_key,
+                    group_success,
+                    len(group_failures),
+                    finished_groups,
+                    total_groups,
+                    finished_docs,
+                    total_docs
+                )
+                self._log_robot_push(
+                    stage = "group_finished",
+                    detail = (
+                        f"group = {group_key}, success = {group_success}, failed = {len(group_failures)}, "
+                        f"group_progress = {finished_groups}/{total_groups}, "
+                        f"doc_progress = {finished_docs}/{total_docs}"
+                    )
+                )
+                self._notify(
+                    chat_id = chat_id,
+                    level = notify_level,
+                    message = (
+                        f"分组完成：{group_key}，success = {group_success}，failed = {len(group_failures)}，"
+                        f"进度：groups {finished_groups}/{total_groups}，docs {finished_docs}/{total_docs}"
+                    ),
+                    force = notify_level == "normal"
+                )
+
+                for raw_failure in worker_result.get("failures", []):
+                    failure_path = str(raw_failure.get("path", ""))
+                    failure_reason = str(raw_failure.get("reason", ""))
+                    logger.warning(
+                        "group doc failed: group = %s, path = %s, error = %s",
+                        group_key,
+                        failure_path,
+                        failure_reason
+                    )
+                    self._log_robot_push(
+                        stage = "failed",
+                        detail = f"path = {failure_path}, error = {failure_reason[:240]}"
+                    )
+                    self._notify(
+                        chat_id = chat_id,
+                        level = notify_level,
+                        message = f"写入失败：{failure_path}，原因：{failure_reason[:300]}",
+                        force = True
+                    )
+                    failures.append(
+                        ImportFailure(
+                            path = failure_path,
+                            reason = failure_reason
+                        )
+                    )
+                for raw_created in worker_result.get("created_docs", []):
+                    created_path = str(raw_created.get("path", ""))
+                    created_document_id = str(raw_created.get("document_id", ""))
+                    logger.info(
+                        "group doc created: group = %s, path = %s, document_id = %s",
+                        group_key,
+                        created_path,
+                        created_document_id
+                    )
+                    self._log_robot_push(
+                        stage = "doc_created",
+                        detail = (
+                            f"path = {created_path}, document_id = {created_document_id}, "
+                            f"group = {group_key}"
+                        )
+                    )
+                    self._notify(
+                        chat_id = chat_id,
+                        level = notify_level,
+                        message = f"写入完成：{created_path}",
+                        force = notify_level == "normal"
+                    )
+                    created_docs.append(
+                        CreatedDocRecord(
+                            path = created_path,
+                            title = str(raw_created.get("title", "")),
+                            document_id = created_document_id,
+                            doc_url = str(raw_created.get("doc_url", "")),
+                            wiki_node_token = str(raw_created.get("wiki_node_token", ""))
+                        )
+                    )
+        except KeyboardInterrupt:
+            self._terminate_process_pool(executor = executor)
+            raise
+        finally:
+            try:
+                executor.shutdown(wait = False, cancel_futures = True)
+            except Exception:
+                pass
+
+        logger.info(
+            "grouped import finished: success = %d, failed = %d",
+            successes,
+            len(failures)
+        )
+        self._log_robot_push(
+            stage = "grouped_finished",
+            detail = f"success = {successes}, failed = {len(failures)}"
+        )
+
+        return {
+            "success": successes,
+            "failures": failures,
+            "created_docs": created_docs
+        }
+
+    def _build_doc_snapshots(
+        self,
+        manifest: ImportManifest
+    ) -> tuple[dict[str, SourceDocument], list[ImportFailure]]:
+        """Read markdown docs into serializable snapshot map.
+
+        Args:
+            manifest: Ordered import manifest.
+        """
+
+        snapshots: dict[str, SourceDocument] = {}
+        failures: list[ImportFailure] = []
+        for item in manifest.items:
+            try:
+                doc = self.source_adapter.read_markdown(relative_path = item.path)
+                snapshots[item.path] = SourceDocument(
+                    path = doc.path,
+                    title = doc.title,
+                    markdown = doc.markdown,
+                    assets = [],
+                    relative_dir = doc.relative_dir,
+                    base_ref = doc.base_ref,
+                    source_type = doc.source_type
+                )
+            except Exception as exc:
+                failures.append(
+                    ImportFailure(
+                        path = item.path,
+                        reason = str(exc)
+                    )
+                )
+        return snapshots, failures
+
+    def _build_folder_token_by_path(
+        self,
+        items: list,
+        snapshots: dict[str, SourceDocument],
+        write_mode: str,
+        folder_subdirs: bool,
+        folder_root_relative_dir: str,
+        folder_root_token: str
+    ) -> dict[str, str]:
+        """Build destination folder token map for each document path.
+
+        Args:
+            items: Manifest items.
+            snapshots: Path-to-document snapshot map.
+            write_mode: Write mode.
+            folder_subdirs: Whether to build hierarchy by source dirs.
+            folder_root_relative_dir: Optional task root folder path.
+            folder_root_token: Optional task root folder token.
+        """
+
+        result: dict[str, str] = {}
+        if write_mode not in {"folder", "both"}:
+            return result
+
+        relative_dir_cache: dict[str, str] = {}
+        for item in items:
+            path = item.path
+            doc = snapshots.get(path)
+            if not doc:
+                continue
+
+            target_folder_token = folder_root_token
+            if folder_subdirs:
+                effective_relative_dir = doc.relative_dir
+                if folder_root_relative_dir:
+                    if effective_relative_dir:
+                        effective_relative_dir = (
+                            f"{folder_root_relative_dir}/{effective_relative_dir}"
+                        )
+                    else:
+                        effective_relative_dir = folder_root_relative_dir
+                if effective_relative_dir not in relative_dir_cache:
+                    relative_dir_cache[effective_relative_dir] = self.doc_writer.ensure_folder_path(
+                        relative_dir = effective_relative_dir
+                    )
+                target_folder_token = relative_dir_cache[effective_relative_dir]
+            result[path] = target_folder_token
+
+        if folder_subdirs:
+            logger.info(
+                "folder token map ready: docs = %d, unique_dirs = %d",
+                len(result),
+                len(relative_dir_cache)
+            )
+        return result
+
+    def _build_wiki_parent_by_path(
+        self,
+        items: list,
+        snapshots: dict[str, SourceDocument],
+        write_mode: str,
+        space_id: str
+    ) -> dict[str, str]:
+        """Build wiki parent node token map for each document path.
+
+        Args:
+            items: Manifest items.
+            snapshots: Path-to-document snapshot map.
+            write_mode: Write mode.
+            space_id: Wiki space id.
+        """
+
+        result: dict[str, str] = {}
+        if write_mode not in {"wiki", "both"} or not self.wiki_service:
+            return result
+
+        relative_dir_cache: dict[str, str] = {}
+        for item in items:
+            path = item.path
+            doc = snapshots.get(path)
+            if not doc:
+                continue
+
+            relative_dir = doc.relative_dir
+            if relative_dir not in relative_dir_cache:
+                relative_dir_cache[relative_dir] = self.wiki_service.ensure_path_nodes(
+                    space_id = space_id,
+                    relative_dir = relative_dir
+                )
+            result[path] = relative_dir_cache[relative_dir]
+
+        logger.info(
+            "wiki parent map ready: docs = %d, unique_dirs = %d",
+            len(result),
+            len(relative_dir_cache)
+        )
+        return result
+
+    def _group_items_by_top_dir(self, items: list) -> list[tuple[str, list]]:
+        """Group manifest items by first source subdirectory segment.
+
+        Args:
+            items: Manifest items.
+        """
+
+        grouped: dict[str, list] = {}
+        order: list[str] = []
+        for item in items:
+            group_key = self._top_dir_group_key(relative_dir = getattr(item, "relative_dir", ""))
+            if group_key not in grouped:
+                grouped[group_key] = []
+                order.append(group_key)
+            grouped[group_key].append(item)
+        return [(group_key, grouped[group_key]) for group_key in order]
+
+    def _top_dir_group_key(self, relative_dir: str) -> str:
+        """Return top-level directory grouping key for one relative dir.
+
+        Args:
+            relative_dir: Source relative directory.
+        """
+
+        normalized = (relative_dir or "").strip().replace("\\", "/").strip("/")
+        if not normalized:
+            return "__root__"
+        return normalized.split("/", 1)[0]
+
+    def _terminate_process_pool(self, executor: ProcessPoolExecutor) -> None:
+        """Terminate all process pool workers immediately.
+
+        Args:
+            executor: Process pool executor.
+        """
+
+        try:
+            processes = list((getattr(executor, "_processes", {}) or {}).values())
+        except Exception:
+            processes = []
+
+        for process in processes:
+            try:
+                if process.is_alive():
+                    process.terminate()
+            except Exception:
+                continue
+
+        for process in processes:
+            try:
+                process.join(timeout = 0.2)
+            except Exception:
+                continue
+
+        for process in processes:
+            try:
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+            except Exception:
+                continue
+
+        try:
+            executor.shutdown(wait = False, cancel_futures = True)
+        except Exception:
+            pass
+
+    def _write_folder_navigation_doc_with_llm(
+        self,
+        folder_nav_title: str,
+        manifest: ImportManifest,
+        created_docs: list[CreatedDocRecord],
+        folder_token: str,
+        source_paths: list[str],
+        toc_file: str
+    ) -> bool:
+        """Generate and write folder navigation doc by LLM output.
+
+        Args:
+            folder_nav_title: Navigation document title.
+            manifest: Import manifest.
+            created_docs: Created docs.
+            folder_token: Destination folder token.
+            source_paths: Source markdown paths from adapter.
+            toc_file: TOC filename.
+        """
+
+        if not self.llm_client:
+            return False
+
+        llm_generate = getattr(self.llm_client, "generate_folder_nav_markdown", None)
+        if not callable(llm_generate):
+            return False
+
+        record_by_path = {item.path: item for item in created_docs}
+        llm_documents = []
+        for item in manifest.items:
+            record = record_by_path.get(item.path)
+            if not record:
+                continue
+            llm_documents.append(
+                {
+                    "path": item.path,
+                    "title": record.title,
+                    "relative_dir": item.relative_dir,
+                    "toc_label": item.toc_label
+                }
+            )
+
+        context_markdown = self._load_llm_nav_context_markdown(
+            source_paths = source_paths,
+            toc_file = toc_file
+        )
+
+        try:
+            llm_markdown = llm_generate(
+                context_markdown = context_markdown,
+                documents = llm_documents
+            )
+        except Exception:
+            logger.exception("LLM folder nav generation failed")
+            return False
+
+        if not llm_markdown or not llm_markdown.strip():
+            return False
+
+        rewritten_markdown, rewritten_links = self._replace_source_links_in_nav_markdown(
+            markdown = llm_markdown,
+            created_docs = created_docs
+        )
+        if rewritten_links <= 0:
+            return False
+        if len(rewritten_markdown.strip()) < 20:
+            return False
+
+        try:
+            nav_create = self._create_doc_with_meta(
+                title = self._normalize_doc_title(title = folder_nav_title) or "00-导航总目录",
+                folder_token = folder_token
+            )
+            self.doc_writer.write_markdown_with_fallback(
+                document_id = nav_create["document_id"],
+                content = rewritten_markdown
+            )
+            self._log_robot_push(
+                stage = "folder_nav_created",
+                detail = (
+                    f"title = {folder_nav_title}, document_id = {nav_create['document_id']}, "
+                    f"entries = {len(created_docs)}, mode = llm"
+                )
+            )
+        except Exception:
+            logger.exception("LLM folder nav write failed")
+            return False
+        return True
+
+    def _load_llm_nav_context_markdown(self, source_paths: list[str], toc_file: str) -> str:
+        """Load root README first, fallback to TOC markdown for LLM context.
+
+        Args:
+            source_paths: Source markdown paths.
+            toc_file: TOC file path.
+        """
+
+        path_lookup: dict[str, str] = {}
+        for path in source_paths:
+            normalized = self._normalize_source_relative_path(path = path)
+            if not normalized:
+                continue
+            path_lookup[normalized.lower()] = normalized
+
+        root_candidates = [
+            "README.md",
+            "readme.md"
+        ]
+        for candidate in root_candidates:
+            selected = path_lookup.get(candidate.lower(), "")
+            if not selected:
+                continue
+            try:
+                return self.source_adapter.read_markdown(relative_path = selected).markdown
+            except Exception:
+                continue
+
+        normalized_toc = self._normalize_source_relative_path(path = toc_file)
+        if normalized_toc:
+            selected_toc = path_lookup.get(normalized_toc.lower(), "")
+            if selected_toc:
+                try:
+                    return self.source_adapter.read_markdown(relative_path = selected_toc).markdown
+                except Exception:
+                    return ""
+        return ""
+
+    def _replace_source_links_in_nav_markdown(
+        self,
+        markdown: str,
+        created_docs: list[CreatedDocRecord]
+    ) -> tuple[str, int]:
+        """Replace source-path markdown links with final Feishu doc links.
+
+        Args:
+            markdown: LLM-generated markdown.
+            created_docs: Created document records.
+        """
+
+        link_pattern = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
+        record_lookup: dict[str, CreatedDocRecord] = {}
+        for item in created_docs:
+            normalized = self._normalize_source_relative_path(path = item.path)
+            if normalized:
+                record_lookup[normalized.lower()] = item
+
+        replaced_count_ref = [0]
+
+        def _replace(match: re.Match) -> str:
+            label = (match.group("label") or "").strip()
+            target = (match.group("target") or "").strip()
+            normalized_target = self._normalize_source_relative_path(path = target)
+            if not normalized_target:
+                return match.group(0)
+
+            record = record_lookup.get(normalized_target.lower())
+            if not record:
+                return match.group(0)
+
+            replaced_count_ref[0] += 1
+            if record.doc_url:
+                return f"[{label}]({record.doc_url})"
+            return (
+                f"{label} · `{record.path}` "
+                f"(document_id: `{record.document_id}`)"
+            )
+
+        rewritten = link_pattern.sub(_replace, markdown)
+        return rewritten, replaced_count_ref[0]
+
+    def _normalize_source_relative_path(self, path: str) -> str:
+        """Normalize path text into source-relative path format.
+
+        Args:
+            path: Raw path text.
+        """
+
+        value = urllib.parse.unquote((path or "").strip())
+        if not value:
+            return ""
+
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme:
+            return ""
+
+        value = value.replace("\\", "/")
+        value = value.split("#", 1)[0]
+        value = value.split("?", 1)[0]
+        if not value:
+            return ""
+
+        normalized = posixpath.normpath(value).lstrip("/")
+        if normalized in {"", "."}:
+            return ""
+        if normalized.startswith("../"):
+            return ""
+        return normalized
 
     def _resolve_folder_root_subdir_name(self, explicit_name: str) -> str:
         """Resolve task root folder name for one import run.

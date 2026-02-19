@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import logging
+import datetime
 
 
 from config.config import AppConfig
@@ -25,6 +26,101 @@ from utils.oauth_local_auth import persist_user_tokens_to_env
 
 logger = logging.getLogger(__name__)
 
+LOG_FILE_ENV_KEY = "KNOWLEDGE_GENERATOR_LOG_PATH"
+DEFAULT_LOG_DIR = "logs"
+DEFAULT_LOG_PREFIX = "knowledge_generator"
+DEFAULT_MAX_LOG_FILES = 8
+
+
+def _new_run_log_path(log_dir: str, log_prefix: str) -> str:
+    """Build one per-run log file path.
+
+    Args:
+        log_dir: Log directory path.
+        log_prefix: Log file name prefix.
+    """
+
+    os.makedirs(log_dir, exist_ok = True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{log_prefix}_{timestamp}_{os.getpid()}.log"
+    return os.path.join(log_dir, filename)
+
+
+def _cleanup_old_log_files(log_dir: str, log_prefix: str, max_files: int) -> None:
+    """Keep only the latest log files under one prefix.
+
+    Args:
+        log_dir: Log directory path.
+        log_prefix: Log file name prefix.
+        max_files: Max log files to retain.
+    """
+
+    if max_files < 1:
+        return
+
+    try:
+        filenames = os.listdir(log_dir)
+    except FileNotFoundError:
+        return
+
+    candidates = []
+    for filename in filenames:
+        if not filename.startswith(f"{log_prefix}_") or not filename.endswith(".log"):
+            continue
+        full_path = os.path.join(log_dir, filename)
+        if not os.path.isfile(full_path):
+            continue
+        candidates.append(full_path)
+
+    candidates.sort(
+        key = lambda path: os.path.getmtime(path),
+        reverse = True
+    )
+    for stale_path in candidates[max_files:]:
+        try:
+            os.remove(stale_path)
+        except OSError:
+            continue
+
+
+def _configure_runtime_logging(
+    log_dir: str = DEFAULT_LOG_DIR,
+    log_prefix: str = DEFAULT_LOG_PREFIX,
+    max_files: int = DEFAULT_MAX_LOG_FILES
+) -> str:
+    """Configure stream + file logging and cleanup old log files.
+
+    Args:
+        log_dir: Log directory path.
+        log_prefix: Log file name prefix.
+        max_files: Max log files to retain.
+    """
+
+    log_path = _new_run_log_path(log_dir = log_dir, log_prefix = log_prefix)
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    root_logger.addHandler(stream_handler)
+
+    file_handler = logging.FileHandler(log_path, encoding = "utf-8")
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+
+    root_logger.setLevel(logging.INFO)
+    os.environ[LOG_FILE_ENV_KEY] = log_path
+    _cleanup_old_log_files(
+        log_dir = log_dir,
+        log_prefix = log_prefix,
+        max_files = max_files
+    )
+    logger.info("main log file ready: %s", log_path)
+    return log_path
+
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments for import command.
@@ -40,15 +136,35 @@ def parse_args() -> argparse.Namespace:
         "--source",
         choices = ["local", "github"],
         required = True,
-        help = "Source type"
+        help = "Source type: local or github"
     )
-    parser.add_argument("--path", default = "", help = "Local source directory path")
-    parser.add_argument("--repo", default = "", help = "GitHub repo owner/name or url")
-    parser.add_argument("--ref", default = "main", help = "GitHub branch/tag/commit")
-    parser.add_argument("--subdir", default = "", help = "GitHub subdirectory path")
+    parser.add_argument(
+        "--path",
+        default = "",
+        help = "Local source directory path (required when --source local)"
+    )
+    parser.add_argument(
+        "--repo",
+        default = "",
+        help = "GitHub repo: owner/name or full URL (required when --source github)"
+    )
+    parser.add_argument("--ref", default = "main", help = "GitHub branch/tag/commit name")
+    parser.add_argument(
+        "--subdir",
+        default = "",
+        help = "GitHub subdirectory path (relative to repo root)"
+    )
 
-    parser.add_argument("--auth-code", default = "", help = "One-time Feishu OAuth code to bootstrap user token")
-    parser.add_argument("--oauth-redirect-uri", default = "", help = "OAuth redirect URI used with --auth-code")
+    parser.add_argument(
+        "--auth-code",
+        default = "",
+        help = "One-time Feishu OAuth code to bootstrap user token"
+    )
+    parser.add_argument(
+        "--oauth-redirect-uri",
+        default = "",
+        help = "OAuth redirect URI used with --auth-code/--print-auth-url/--oauth-local-server"
+    )
     parser.add_argument(
         "--oauth-scope",
         default = "wiki:wiki offline_access",
@@ -61,7 +177,12 @@ def parse_args() -> argparse.Namespace:
         action = "store_true",
         help = "Start local callback server, capture code, and exchange token automatically"
     )
-    parser.add_argument("--oauth-timeout", type = int, default = 300, help = "OAuth callback wait timeout seconds")
+    parser.add_argument(
+        "--oauth-timeout",
+        type = int,
+        default = 300,
+        help = "OAuth callback wait timeout in seconds"
+    )
     parser.add_argument(
         "--oauth-open-browser",
         action = argparse.BooleanOptionalAction,
@@ -88,7 +209,10 @@ def parse_args() -> argparse.Namespace:
         "--folder-subdirs",
         action = argparse.BooleanOptionalAction,
         default = False,
-        help = "When write-mode includes folder, auto-create subfolders by source directories"
+        help = (
+            "When write-mode includes folder, auto-create subfolders by source directories "
+            "(root README/readme/index is filtered; subdir README kept)"
+        )
     )
     parser.add_argument(
         "--folder-root-subdir",
@@ -116,7 +240,10 @@ def parse_args() -> argparse.Namespace:
         "--folder-nav-doc",
         action = argparse.BooleanOptionalAction,
         default = True,
-        help = "Generate folder navigation document after markdown import"
+        help = (
+            "Generate folder navigation document after import "
+            "(folder-subdirs=true uses LLM folder nav; failure skips nav doc)"
+        )
     )
     parser.add_argument(
         "--folder-nav-title",
@@ -137,7 +264,24 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--dry-run", action = "store_true", help = "Parse only, no Feishu writes")
-    parser.add_argument("--max-workers", type = int, default = 1, help = "Reserved for future parallelism")
+    parser.add_argument(
+        "--max-workers",
+        type = int,
+        default = 1,
+        help = (
+            "Document import workers: 1 means sequential; >1 enables grouped multiprocessing "
+            "by top-level subdir; recommended 2-4 for Feishu API stability"
+        )
+    )
+    parser.add_argument(
+        "--chunk-workers",
+        type = int,
+        default = 2,
+        help = (
+            "Per-document chunk planning worker threads (API writes remain sequential); "
+            "recommend <= CPU logical cores"
+        )
+    )
     parser.add_argument(
         "--notify-level",
         choices = ["none", "minimal", "normal"],
@@ -164,6 +308,8 @@ def main() -> int:
         raise ValueError("--repo is required when --source github")
     if args.max_workers < 1:
         raise ValueError("--max-workers must be >= 1")
+    if args.chunk_workers < 1:
+        raise ValueError("--chunk-workers must be >= 1")
     if args.llm_max_calls < 0:
         raise ValueError("--llm-max-calls must be >= 0")
     if args.oauth_timeout < 1:
@@ -184,9 +330,6 @@ def main() -> int:
         logger.warning("--folder-root-subdir only applies when --write-mode is folder or both")
     if args.folder_root_subdir_name and not args.folder_root_subdir:
         logger.warning("--folder-root-subdir-name is ignored when --no-folder-root-subdir")
-
-    if args.max_workers > 1:
-        logger.warning("max_workers > 1 is reserved in v1; running sequentially")
 
     http_client = HttpClient(
         timeout = config.request_timeout,
@@ -285,7 +428,8 @@ def main() -> int:
             http_client = http_client,
             base_url = config.feishu_base_url,
             folder_token = config.feishu_folder_token if args.write_mode in {"folder", "both"} else "",
-            convert_max_bytes = config.feishu_convert_max_bytes
+            convert_max_bytes = config.feishu_convert_max_bytes,
+            chunk_workers = args.chunk_workers
         )
         media_service = MediaService(
             auth_client = app_auth,
@@ -362,7 +506,9 @@ def main() -> int:
         folder_nav_doc = args.folder_nav_doc,
         folder_nav_title = args.folder_nav_title,
         llm_fallback = args.llm_fallback,
-        llm_max_calls = args.llm_max_calls
+        llm_max_calls = args.llm_max_calls,
+        max_workers = args.max_workers,
+        chunk_workers = args.chunk_workers
     )
 
     if result.failed > 0:
@@ -435,14 +581,13 @@ def _validate_runtime_credentials(args: argparse.Namespace, config: AppConfig) -
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level = logging.INFO,
-        format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers = [logging.StreamHandler()]
-    )
+    _configure_runtime_logging()
 
     try:
         exit_code = main()
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user")
+        exit_code = 130
     except Exception as exc:
         logger.exception("Fatal error: %s", str(exc))
         exit_code = 1

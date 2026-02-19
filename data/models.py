@@ -75,6 +75,19 @@ class ImportFailure:
 
 
 @dataclass
+class ImportSkipped:
+    """One skipped import item.
+
+    Args:
+        path: Document path that is skipped.
+        reason: Skip reason summary.
+    """
+
+    path: str
+    reason: str
+
+
+@dataclass
 class ImportResult:
     """Final task result for one import run.
 
@@ -82,13 +95,19 @@ class ImportResult:
         total: Total markdown files discovered.
         success: Successfully imported file count.
         failed: Failed file count.
+        skipped: Skipped file count.
         failures: Detailed failures.
+        skipped_items: Detailed skipped items.
+        created_docs: Successfully created documents.
     """
 
     total: int = 0
     success: int = 0
     failed: int = 0
+    skipped: int = 0
     failures: List[ImportFailure] = dataclasses.field(default_factory = list)
+    skipped_items: List[ImportSkipped] = dataclasses.field(default_factory = list)
+    created_docs: List["CreatedDocRecord"] = dataclasses.field(default_factory = list)
 
 
 @dataclass
@@ -123,6 +142,7 @@ class ImportManifest:
         matched_links: Links successfully resolved into source paths.
         ambiguous_links: Links with multiple candidate paths.
         fallback_count: Links not resolved by LLM fallback.
+        skipped_items: Skipped items collected during planning.
     """
 
     items: List[DocumentPlanItem] = dataclasses.field(default_factory = list)
@@ -133,6 +153,7 @@ class ImportManifest:
     matched_links: int = 0
     ambiguous_links: int = 0
     fallback_count: int = 0
+    skipped_items: List[ImportSkipped] = dataclasses.field(default_factory = list)
 
 
 @dataclass

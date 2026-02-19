@@ -201,8 +201,8 @@ class TestOrchestrationPlanner(unittest.TestCase):
         self.assertEqual(manifest.llm_calls, 1)
         self.assertLessEqual(resolver.calls, 1)
 
-    def test_readme_and_toc_are_kept_as_index_documents(self) -> None:
-        """README and TOC files should remain included and marked as index.
+    def test_root_readme_filtered_but_subdir_readme_kept(self) -> None:
+        """Root README should be filtered while subdir README remains included.
 
         Args:
             self: Test case instance.
@@ -227,8 +227,93 @@ class TestOrchestrationPlanner(unittest.TestCase):
             llm_max_calls = 0
         )
 
-        self.assertEqual(len(manifest.items), 3)
+        self.assertEqual(len(manifest.items), 2)
+        self.assertEqual(
+            [item.path for item in manifest.items],
+            ["TABLE_OF_CONTENTS.md", "sub/README.md"]
+        )
         self.assertTrue(all(item.is_index for item in manifest.items))
+        self.assertEqual(len(manifest.skipped_items), 1)
+        self.assertEqual(manifest.skipped_items[0].path, "README.md")
+
+    def test_toc_link_to_root_readme_recorded_as_skipped(self) -> None:
+        """TOC links to filtered root README should be reported as skipped.
+
+        Args:
+            self: Test case instance.
+        """
+
+        toc = (
+            "# TOC\n"
+            "- [Root Readme](./README.md)\n"
+            "- [Sub Readme](./sub/README.md)\n"
+        )
+        docs = {
+            "TABLE_OF_CONTENTS.md": self._doc(path = "TABLE_OF_CONTENTS.md", markdown = toc),
+            "README.md": self._doc(path = "README.md"),
+            "sub/README.md": self._doc(path = "sub/README.md")
+        }
+        source = PlannerSource(
+            docs = docs,
+            paths = ["TABLE_OF_CONTENTS.md", "README.md", "sub/README.md"]
+        )
+        planner = OrchestrationPlanner(source_adapter = source)
+
+        manifest = planner.build_manifest(
+            markdown_paths = source.list_markdown(),
+            structure_order = "toc_first",
+            toc_file = "TABLE_OF_CONTENTS.md",
+            llm_fallback = "off",
+            llm_max_calls = 0
+        )
+
+        self.assertEqual([item.path for item in manifest.items], ["sub/README.md", "TABLE_OF_CONTENTS.md"])
+        self.assertEqual(len(manifest.unresolved_links), 0)
+        self.assertGreaterEqual(len(manifest.skipped_items), 1)
+        self.assertIn(
+            "root_readme_filtered",
+            [item.reason for item in manifest.skipped_items]
+        )
+        self.assertTrue(all(item.is_index for item in manifest.items))
+
+    def test_root_index_filtered_but_subdir_index_kept(self) -> None:
+        """Root index should be filtered while subdir index remains included.
+
+        Args:
+            self: Test case instance.
+        """
+
+        docs = {
+            "index.md": self._doc(path = "index.md"),
+            "TABLE_OF_CONTENTS.md": self._doc(path = "TABLE_OF_CONTENTS.md"),
+            "sub/index.md": self._doc(path = "sub/index.md")
+        }
+        source = PlannerSource(
+            docs = docs,
+            paths = ["index.md", "TABLE_OF_CONTENTS.md", "sub/index.md"]
+        )
+        planner = OrchestrationPlanner(source_adapter = source)
+
+        manifest = planner.build_manifest(
+            markdown_paths = source.list_markdown(),
+            structure_order = "path",
+            toc_file = "TABLE_OF_CONTENTS.md",
+            llm_fallback = "off",
+            llm_max_calls = 0
+        )
+
+        self.assertEqual(
+            [item.path for item in manifest.items],
+            ["TABLE_OF_CONTENTS.md", "sub/index.md"]
+        )
+        self.assertEqual(
+            [item.path for item in manifest.skipped_items],
+            ["index.md"]
+        )
+        self.assertEqual(
+            [item.reason for item in manifest.skipped_items],
+            ["root_readme_filtered"]
+        )
 
 
 if __name__ == "__main__":
