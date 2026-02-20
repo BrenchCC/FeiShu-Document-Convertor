@@ -1,7 +1,6 @@
-"""
-任务队列模块
+"""Task queue module.
 
-提供任务异步处理功能
+Provides asynchronous task execution helpers.
 """
 
 import logging
@@ -13,14 +12,14 @@ from web.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 创建Celery应用（使用内存broker和backend，不需要Redis）
+# Create Celery app with memory broker/backend (no Redis required)
 celery_app = Celery(
     "tasks",
     broker = "memory://",
     backend = "cache+memory://"
 )
 
-# 配置Celery
+# Configure Celery
 celery_app.conf.update(
     task_serializer = "json",
     accept_content = ["json"],
@@ -28,11 +27,11 @@ celery_app.conf.update(
     timezone = "Asia/Shanghai",
     enable_utc = True,
     task_track_started = True,
-    task_time_limit = 3600,  # 任务超时时间（秒）
+    task_time_limit = 3600,  # Task timeout (seconds)
     broker_connection_retry_on_startup = True
 )
 
-# 自动发现任务
+# Auto-discover tasks
 celery_app.autodiscover_tasks(
     ["web.tasks"],
     force = True

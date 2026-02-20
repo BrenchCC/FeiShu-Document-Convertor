@@ -1,17 +1,20 @@
-"""
-任务管理API
+"""Task management API.
 
-提供任务列表、详情、删除和重试功能
+Provides task list, detail, delete, and retry endpoints.
 """
 
+import os
+import sys
 import logging
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
 
-from web.dependencies import get_current_user
+sys.path.append(os.getcwd())
+
 from web.models.task import Task, TaskStatus
+from web.api.task_helpers import get_task_or_404
 from web.tasks.import_task import start_import_task
 
 router = APIRouter()
@@ -19,29 +22,29 @@ logger = logging.getLogger(__name__)
 
 
 class TaskList(BaseModel):
-    """任务列表"""
+    """Task list payload."""
     total: int
     tasks: List[dict]
 
 
 @router.get("/", response_model = TaskList)
 async def get_tasks(page: int = 1, page_size: int = 10, status: str = None):
-    """获取任务列表"""
+    """Return task list."""
     try:
         logger.info(f"获取任务列表: 第{page}页，每页{page_size}条")
 
         tasks = Task.get_all()
 
-        # 状态过滤
+        # Status filtering
         if status:
             tasks = [task for task in tasks if task.status == status]
 
-        # 分页
+        # Pagination
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         paged_tasks = tasks[start_idx:end_idx]
 
-        # 格式化输出
+        # Format output
         formatted_tasks = []
         for task in paged_tasks:
             formatted_tasks.append({
@@ -72,13 +75,11 @@ async def get_tasks(page: int = 1, page_size: int = 10, status: str = None):
 
 @router.get("/{task_id}")
 async def get_task_detail(task_id: str):
-    """获取任务详情"""
+    """Return task detail."""
     try:
         logger.info(f"获取任务详情: {task_id}")
 
-        task = Task.get(task_id)
-        if not task:
-            raise HTTPException(status_code = 404, detail = "任务不存在")
+        task = get_task_or_404(task_id = task_id)
 
         return {
             "task_id": task.task_id,
@@ -115,13 +116,11 @@ async def get_task_detail(task_id: str):
 
 @router.delete("/{task_id}")
 async def delete_task(task_id: str):
-    """删除任务"""
+    """Delete task."""
     try:
         logger.info(f"删除任务: {task_id}")
 
-        task = Task.get(task_id)
-        if not task:
-            raise HTTPException(status_code = 404, detail = "任务不存在")
+        task = get_task_or_404(task_id = task_id)
 
         Task.delete(task_id)
         logger.info(f"任务已删除: {task_id}")
@@ -137,21 +136,19 @@ async def delete_task(task_id: str):
 
 @router.post("/{task_id}/retry")
 async def retry_task(task_id: str):
-    """重试任务"""
+    """Retry task."""
     try:
         logger.info(f"重试任务: {task_id}")
 
-        task = Task.get(task_id)
-        if not task:
-            raise HTTPException(status_code = 404, detail = "任务不存在")
+        task = get_task_or_404(task_id = task_id)
 
         if task.status == TaskStatus.RUNNING:
             raise HTTPException(status_code = 400, detail = "任务正在运行，无法重试")
 
-        # 创建新任务
+        # Create new task
         new_task_id = Task.create_from_task(task)
 
-        # 启动异步任务
+        # Start async task
         request = {
             "source_type": task.source_type,
             "path": task.path,

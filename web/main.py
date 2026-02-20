@@ -1,32 +1,37 @@
 """
-飞书文档转换器Web应用主入口
+Feishu document converter web entrypoint.
 
-提供基于FastAPI的Web接口，支持文档导入任务的创建、监控和管理。
+Provides FastAPI endpoints for import task creation and monitoring.
 """
-
-import logging
+import os
 import sys
+import logging
+from importlib import import_module
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from web.config import settings
+from config.config import get_project_root
+from utils.logging_setup import configure_web_logging
 
-# 添加项目根目录到Python路径
-sys.path.insert(0, '/Users/brench/brench_project_collections/Self_Learning_Project/FeiShu-Document-Convertor')
+system_api = import_module("web.api.system")
+sources_api = import_module("web.api.sources")
+import_router_api = import_module("web.api.import_router")
+tasks_api = import_module("web.api.tasks")
+notifications_api = import_module("web.api.notifications")
 
-# 配置日志
-logging.basicConfig(
-    level = logging.INFO,
-    format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers = [logging.StreamHandler()]
-)
 
 logger = logging.getLogger(__name__)
 
-# 创建FastAPI应用
 app = FastAPI(
     title = "飞书文档转换器API",
     description = "用于将本地目录或GitHub仓库中的Markdown文档导入飞书云文档或知识库的Web API",
@@ -35,7 +40,6 @@ app = FastAPI(
     redoc_url = "/redoc"
 )
 
-# 配置CORS中间件
 app.add_middleware(
     CORSMiddleware,
     allow_origins = ["*"],
@@ -44,44 +48,54 @@ app.add_middleware(
     allow_headers = ["*"],
 )
 
-# 挂载静态文件（前端页面）
-app.mount("/static", StaticFiles(directory = "/Users/brench/brench_project_collections/Self_Learning_Project/FeiShu-Document-Convertor/web"), name = "static")
-app.mount("/assets", StaticFiles(directory = "/Users/brench/brench_project_collections/Self_Learning_Project/FeiShu-Document-Convertor/assets"), name = "assets")
+project_root = get_project_root()
+static_dir = project_root / "web"
+assets_dir = project_root / "assets"
+app.mount("/static", StaticFiles(directory = str(static_dir)), name = "static")
+app.mount("/assets", StaticFiles(directory = str(assets_dir)), name = "assets")
 
-# 全局异常处理
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    """全局异常处理"""
-    logger.error(f"请求 {request.url} 失败: {str(exc)}", exc_info = True)
+    """Handle unhandled exceptions for API requests.
+
+    Args:
+        request: FastAPI request.
+        exc: Exception instance.
+    """
+
+    logger.error("Request %s failed: %s", request.url, str(exc), exc_info = True)
     return JSONResponse(
         status_code = 500,
         content = {"error": "内部服务器错误", "message": str(exc)}
     )
 
-# 导入API路由
-from web.api import system, sources, import_router, tasks, notifications
 
-app.include_router(system.router, prefix = "/api/system", tags = ["系统管理"])
-app.include_router(sources.router, prefix = "/api/sources", tags = ["源管理"])
-app.include_router(import_router, prefix = "/api/import", tags = ["导入管理"])
-app.include_router(tasks.router, prefix = "/api/tasks", tags = ["任务管理"])
-app.include_router(notifications.router, prefix = "/api/notifications", tags = ["通知管理"])
+app.include_router(system_api.router, prefix = "/api/system", tags = ["系统管理"])
+app.include_router(sources_api.router, prefix = "/api/sources", tags = ["源管理"])
+app.include_router(import_router_api.router, prefix = "/api/import", tags = ["导入管理"])
+app.include_router(tasks_api.router, prefix = "/api/tasks", tags = ["任务管理"])
+app.include_router(notifications_api.router, prefix = "/api/notifications", tags = ["通知管理"])
 
-# 健康检查接口
+
 @app.get("/health")
 async def health_check():
-    """健康检查接口"""
+    """Health check endpoint."""
+
     return {"status": "ok", "version": "1.0.0"}
 
-# 根路径重定向到前端页面
+
 @app.get("/")
 async def root():
-    """根路径重定向到前端页面"""
+    """Redirect to the frontend index page."""
+
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url = "/static/index.html")
 
+
 if __name__ == "__main__":
-    # 启动服务器
+    configure_web_logging(level = logging.INFO)
+
     logger.info("=" * 80)
     logger.info("飞书文档转换器Web服务启动")
     logger.info("=" * 80)
@@ -103,5 +117,8 @@ if __name__ == "__main__":
         "web.main:app",
         host = host,
         port = port,
-        reload = settings.WEB_RELOAD
+        reload = settings.WEB_RELOAD,
+        log_level = settings.LOG_LEVEL.lower(),
+        access_log = True,
+        log_config = None
     )

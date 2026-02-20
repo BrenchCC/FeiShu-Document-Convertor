@@ -1,12 +1,13 @@
-"""
-任务数据模型
+"""Task data models.
 
-定义任务相关的数据结构和操作
+Defines task-related structures and database helpers.
 """
 
 import logging
 import os
 import sqlite3
+import shutil
+from pathlib import Path
 from enum import Enum
 from typing import List, Optional
 
@@ -14,12 +15,14 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# 数据库文件路径
-DATABASE_FILE = os.path.join(os.path.dirname(__file__), "..", "data.db")
+# Database file path
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATABASE_FILE = PROJECT_ROOT / "storage" / "web" / "tasks.db"
+LEGACY_DATABASE_FILE = PROJECT_ROOT / "web" / "data.db"
 
 
 class TaskStatus(str, Enum):
-    """任务状态"""
+    """Task status."""
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -28,7 +31,7 @@ class TaskStatus(str, Enum):
 
 
 class Task:
-    """任务模型"""
+    """Task model."""
 
     def __init__(
         self,
@@ -70,14 +73,21 @@ class Task:
 
     @classmethod
     def _get_connection(cls):
-        """获取数据库连接"""
-        conn = sqlite3.connect(DATABASE_FILE)
+        """Create database connection."""
+        if LEGACY_DATABASE_FILE.exists() and not DATABASE_FILE.exists():
+            DATABASE_FILE.parent.mkdir(parents = True, exist_ok = True)
+            try:
+                shutil.move(str(LEGACY_DATABASE_FILE), str(DATABASE_FILE))
+            except OSError:
+                pass
+        DATABASE_FILE.parent.mkdir(parents = True, exist_ok = True)
+        conn = sqlite3.connect(str(DATABASE_FILE))
         conn.row_factory = sqlite3.Row
         return conn
 
     @classmethod
     def _create_table(cls):
-        """创建任务表"""
+        """Create task table."""
         conn = cls._get_connection()
         cursor = conn.cursor()
 
@@ -114,7 +124,7 @@ class Task:
 
     @classmethod
     def create_from_task(cls, task):
-        """从现有任务创建新任务"""
+        """Create a new task from existing task."""
         new_task = cls(
             task_id = str(time.time()),
             source_type = task.source_type,
@@ -132,13 +142,13 @@ class Task:
         return new_task.task_id
 
     def save(self):
-        """保存任务到数据库"""
+        """Persist task to database."""
         self._create_table()
 
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # 序列化列表字段
+        # Serialize list fields
         failures_str = ";".join(self.failures)
         skipped_items_str = ";".join(self.skipped_items)
         created_docs_str = ";".join(self.created_docs)
@@ -163,7 +173,7 @@ class Task:
 
     @classmethod
     def get(cls, task_id: str):
-        """根据ID获取任务"""
+        """Get task by id."""
         cls._create_table()
 
         conn = cls._get_connection()
@@ -195,7 +205,7 @@ class Task:
             task.failed = row["failed"]
             task.skipped = row["skipped"]
 
-            # 反序列化列表字段
+            # Deserialize list fields
             if row["failures"]:
                 task.failures = row["failures"].split(";")
             if row["skipped_items"]:
@@ -214,7 +224,7 @@ class Task:
 
     @classmethod
     def get_all(cls):
-        """获取所有任务"""
+        """Get all tasks."""
         cls._create_table()
 
         conn = cls._get_connection()
@@ -264,7 +274,7 @@ class Task:
 
     @classmethod
     def delete(cls, task_id: str):
-        """删除任务"""
+        """Delete task."""
         cls._create_table()
 
         conn = cls._get_connection()

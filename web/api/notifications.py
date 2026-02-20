@@ -1,31 +1,34 @@
-"""
-通知管理API
+"""Notification management API.
 
-提供飞书机器人和Chat ID通知功能
+Provides Feishu webhook and chat-id notifications.
 """
 
+import os
+import sys
 import logging
-from typing import List, Optional
+from typing import List
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
+
+sys.path.append(os.getcwd())
 
 from integrations.feishu_api import NotifyService, WebhookNotifyService
-from web.dependencies import get_current_user
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
 class TestNotificationRequest(BaseModel):
-    """测试通知请求"""
+    """Notification test request."""
     webhook_url: Optional[str] = None
     chat_id: Optional[str] = None
     level: str = "normal"
 
 
 class TestNotificationResult(BaseModel):
-    """测试通知结果"""
+    """Notification test response."""
     success: bool
     message: str
     webhook_sent: Optional[bool] = None
@@ -34,7 +37,7 @@ class TestNotificationResult(BaseModel):
 
 @router.post("/test", response_model = TestNotificationResult)
 async def test_notification(request: TestNotificationRequest):
-    """测试通知功能"""
+    """Test notification channels."""
     try:
         logger.info("测试通知功能")
 
@@ -47,7 +50,7 @@ async def test_notification(request: TestNotificationRequest):
 
         sent_count = 0
 
-        # 测试Webhook通知
+        # Test webhook notification
         if request.webhook_url:
             try:
                 from utils.http_client import HttpClient
@@ -63,7 +66,7 @@ async def test_notification(request: TestNotificationRequest):
                 logger.error(f"Webhook通知失败: {str(e)}")
                 results["message"] += f"Webhook通知失败: {str(e)}\n"
 
-        # 测试Chat ID通知
+        # Test chat-id notification
         if request.chat_id:
             try:
                 from web.config import settings
@@ -110,7 +113,7 @@ async def send_webhook_notification(
     content: str,
     level: str = "normal"
 ):
-    """发送Webhook通知"""
+    """Send webhook notification."""
     try:
         logger.info(f"发送Webhook通知: {title}")
 
@@ -133,7 +136,7 @@ async def send_chat_id_notification(
     content: str,
     level: str = "normal"
 ):
-    """发送Chat ID通知"""
+    """Send chat-id notification."""
     try:
         logger.info(f"发送Chat ID通知: {title}")
 

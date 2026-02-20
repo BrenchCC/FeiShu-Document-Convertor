@@ -1,7 +1,6 @@
-"""
-API路由初始化模块
+"""API router initializer.
 
-聚合所有API路由，提供统一的路由入口
+Aggregates all routers for a unified entrypoint.
 """
 
 from web.api.system import router as system_router

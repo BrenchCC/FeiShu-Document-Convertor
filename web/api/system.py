@@ -1,31 +1,34 @@
-"""
-系统管理API
+"""System management API.
 
-提供系统信息、配置管理等功能
+Provides system info and configuration management.
 """
 
+import os
+import sys
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException
+
+sys.path.append(os.getcwd())
 
 from web.config import settings
-from web.dependencies import get_current_user
+from config.config import get_project_root
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
 class SystemInfo(BaseModel):
-    """系统信息"""
+    """System info payload."""
     version: str
     status: str
     features: list
 
 
 class Config(BaseModel):
-    """系统配置"""
+    """System config payload."""
     feishu_app_id: Optional[str] = None
     feishu_app_secret: Optional[str] = None
     feishu_user_access_token: Optional[str] = None
@@ -38,7 +41,7 @@ class Config(BaseModel):
 
 @router.get("/info", response_model = SystemInfo)
 async def get_system_info():
-    """获取系统信息"""
+    """Return system info."""
     return {
         "version": "1.0.0",
         "status": "running",
@@ -55,7 +58,7 @@ async def get_system_info():
 
 @router.get("/config", response_model = Config)
 async def get_system_config():
-    """获取系统配置"""
+    """Return system config."""
     return {
         "feishu_app_id": settings.FEISHU_APP_ID,
         "feishu_app_secret": "****" if settings.FEISHU_APP_SECRET else None,
@@ -70,15 +73,13 @@ async def get_system_config():
 
 @router.post("/config")
 async def update_system_config(config: Config):
-    """更新系统配置"""
+    """Update system config."""
     try:
-        # 更新环境变量和配置文件
         from dotenv import set_key, load_dotenv
-        import os
 
         load_dotenv()
 
-        env_file = os.path.join("/Users/brench/brench_project_collections/Self_Learning_Project/FeiShu-Document-Convertor", ".env")
+        env_file = str(get_project_root() / ".env")
 
         if config.feishu_app_id is not None:
             set_key(env_file, "FEISHU_APP_ID", config.feishu_app_id)

@@ -1,7 +1,6 @@
-"""
-数据模型模块
+"""Data model module.
 
-包含应用程序的数据模型和数据库操作
+Contains application data models and database helpers.
 """
 
 from web.models.task import Task, TaskStatus
