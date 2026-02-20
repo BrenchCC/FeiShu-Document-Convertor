@@ -92,6 +92,26 @@ class TestSourcesAPI:
             assert data["other_files"] == 0
             assert len(data["files"]) == 2
 
+    @patch("web.api.sources.LocalSourceAdapter.list_markdown")
+    @patch("os.path.exists")
+    @patch("os.path.isdir")
+    def test_scan_local_directory_includes_docx_by_default(self, mock_isdir, mock_exists, mock_list, client):
+        """Verify default scan extensions count docx files."""
+        mock_exists.return_value = True
+        mock_isdir.return_value = True
+        mock_list.return_value = [
+            "docs/a.md",
+            "docs/b.markdown",
+            "docs/c.docx"
+        ]
+
+        response = client.get("/api/sources/local/scan?path=/test/path&recursive=true")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_files"] == 3
+        assert data["markdown_files"] == 3
+        assert data["other_files"] == 0
+
     def test_scan_local_directory_invalid_path(self, client):
         """Verify scan rejects invalid paths."""
         response = client.get("/api/sources/local/scan?path=/invalid/path&recursive=true")
@@ -187,6 +207,21 @@ class TestSourcesAPI:
         data = response.json()
         assert "无法打开系统选择器" in data["detail"]
 
+    @patch("web.api.sources.pick_local_path")
+    def test_pick_local_path_uses_docx_extension_by_default(self, mock_pick_local_path, client):
+        """Verify local file picker default extensions include docx."""
+        mock_pick_local_path.return_value = "/Users/demo/file.docx"
+
+        response = client.post("/api/sources/local/pick", json={
+            "target": "file"
+        })
+
+        assert response.status_code == 200
+        mock_pick_local_path.assert_called_once_with(
+            target = "file",
+            extensions = ["md", "markdown", "docx"]
+        )
+
     def test_upload_local_directory_success(self, client):
         """Verify uploading a local directory succeeds."""
         entries = [
@@ -232,6 +267,35 @@ class TestSourcesAPI:
         data = response.json()
         assert data["target"] == "file"
         assert data["file_count"] == 1
+        assert os.path.isfile(data["path"])
+        shutil.rmtree(os.path.dirname(data["path"]), ignore_errors = True)
+
+    def test_upload_local_docx_file_success(self, client):
+        """Verify uploading a single local docx file succeeds."""
+        entries = [{"relative_path": "single.docx"}]
+        response = client.post(
+            "/api/sources/local/upload",
+            data = {
+                "target": "file",
+                "entries_json": json.dumps(entries)
+            },
+            files = [
+                (
+                    "files",
+                    (
+                        "single.docx",
+                        b"PK\x03\x04fake-docx",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+                )
+            ]
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["target"] == "file"
+        assert data["file_count"] == 1
+        assert data["path"].endswith("single.docx")
         assert os.path.isfile(data["path"])
         shutil.rmtree(os.path.dirname(data["path"]), ignore_errors = True)
 

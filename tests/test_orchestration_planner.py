@@ -158,6 +158,38 @@ class TestOrchestrationPlanner(unittest.TestCase):
         )
         self.assertEqual(manifest.toc_links, 0)
 
+    def test_toc_link_supports_docx_target(self) -> None:
+        """TOC parsing should support .docx links."""
+
+        toc = (
+            "# TOC\n"
+            "- [Intro](./docs/intro.docx)\n"
+            "- [Guide](./docs/guide.md)\n"
+        )
+        docs = {
+            "TABLE_OF_CONTENTS.md": self._doc(path = "TABLE_OF_CONTENTS.md", markdown = toc),
+            "docs/intro.docx": self._doc(path = "docs/intro.docx"),
+            "docs/guide.md": self._doc(path = "docs/guide.md")
+        }
+        source = PlannerSource(
+            docs = docs,
+            paths = ["TABLE_OF_CONTENTS.md", "docs/intro.docx", "docs/guide.md"]
+        )
+        planner = OrchestrationPlanner(source_adapter = source)
+
+        manifest = planner.build_manifest(
+            markdown_paths = source.list_markdown(),
+            structure_order = "toc_first",
+            toc_file = "TABLE_OF_CONTENTS.md",
+            llm_fallback = "off",
+            llm_max_calls = 0
+        )
+
+        self.assertEqual(manifest.items[0].path, "docs/intro.docx")
+        self.assertEqual(manifest.items[1].path, "docs/guide.md")
+        self.assertEqual(manifest.toc_links, 2)
+        self.assertEqual(manifest.matched_links, 2)
+
     def test_llm_fallback_resolves_ambiguous_toc_link_with_call_cap(self) -> None:
         """Ambiguous TOC targets should use LLM fallback within call cap.
 
