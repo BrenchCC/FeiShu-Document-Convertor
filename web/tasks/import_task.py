@@ -1,35 +1,39 @@
 """
-导入任务实现
+Import task implementation.
 
-提供任务异步处理功能
+Runs asynchronous or synchronous import tasks.
 """
-
-import logging
 import os
+import sys
 import time
+import logging
 
 from celery import shared_task
-from web.models.task import Task, TaskStatus
-from core.orchestrator import ImportOrchestrator
-from data.source_adapters import LocalSourceAdapter, GitHubSourceAdapter
-from utils.http_client import HttpClient
-from utils.markdown_processor import MarkdownProcessor
+
+sys.path.append(os.getcwd())
+
 from config.config import AppConfig
-from integrations.feishu_api import FeishuAuthClient
-from integrations.feishu_api import DocWriterService
-from integrations.feishu_api import MediaService
-from integrations.feishu_api import WikiService
-from integrations.feishu_api import NotifyService
-from integrations.feishu_api import WebhookNotifyService
-from integrations.feishu_api import FeishuUserTokenManager
-from integrations.llm_client import OpenAICompatibleLlmClient
+from core.bootstrap import build_http_client
+from core.bootstrap import build_orchestrator
+from core.bootstrap import build_source_adapter_from_request
+from core.bootstrap import build_user_token_manager
+from core.bootstrap import is_placeholder_folder_token
+from web.models.task import Task, TaskStatus
+
 
 logger = logging.getLogger(__name__)
 
 
 @shared_task(bind = True, max_retries = 3)
 def start_import_task(self, task_id: str, request: dict):
-    """开始导入任务"""
+    """Start import task.
+
+    Args:
+        self: Celery task instance.
+        task_id: Task id.
+        request: Request payload.
+    """
+
     logger.info(f"开始执行导入任务: {task_id}")
 
     task = Task.get(task_id)
@@ -38,25 +42,17 @@ def start_import_task(self, task_id: str, request: dict):
         return
 
     try:
-        # 更新任务状态为运行中
         task.status = TaskStatus.RUNNING
         task.start_time = time.time()
         task.save()
 
-        # 加载配置
         config = AppConfig.from_env()
-
-        # 初始化 HTTP 客户端
-        http_client = HttpClient(
-            timeout = config.request_timeout,
-            max_retries = config.max_retries,
-            retry_backoff = config.retry_backoff
-        )
+        http_client = build_http_client(config = config)
         is_dry_run = bool(request.get("dry_run", False))
         if (
             not is_dry_run
             and request["write_mode"] in {"folder", "both"}
-            and _is_placeholder_folder_token(
+            and is_placeholder_folder_token(
                 token = config.feishu_folder_token
             )
         ):
@@ -66,123 +62,32 @@ def start_import_task(self, task_id: str, request: dict):
                 config.feishu_folder_token
             )
 
-        # 初始化源适配器
-        if request["source_type"] == "local":
-            adapter = LocalSourceAdapter(root_path = request["path"])
-        elif request["source_type"] == "github":
-            adapter = GitHubSourceAdapter(
-                repo = request["path"],
-                ref = request.get("ref") or request.get("branch", "main"),
-                subdir = request.get("subdir", ""),
-                http_client = http_client
-            )
-        else:
-            raise ValueError(f"不支持的源类型: {request['source_type']}")
-
-        # 初始化 Markdown 处理器
-        markdown_processor = MarkdownProcessor()
-
-        # 初始化 LLM 客户端
-        llm_client = None
-        if config.llm_base_url and config.llm_api_key and config.llm_model:
-            llm_client = OpenAICompatibleLlmClient(
-                base_url = config.llm_base_url,
-                api_key = config.llm_api_key,
-                model = config.llm_model,
-                http_client = http_client
-            )
-            if not llm_client.is_ready():
-                logger.warning(
-                    "LLM 配置不完整，将继续使用规则引擎"
-                )
-                llm_client = None
-
-        # 根据是否为 dry_run 初始化服务
-        if request["dry_run"]:
-            orchestrator = ImportOrchestrator(
-                source_adapter = adapter,
-                markdown_processor = markdown_processor,
+        adapter = build_source_adapter_from_request(
+            request = request,
+            http_client = http_client
+        )
+        user_token_manager = None
+        if request.get("write_mode") in {"wiki", "both"}:
+            user_token_manager = build_user_token_manager(
                 config = config,
-                llm_client = llm_client
-            )
-        else:
-            # 初始化认证客户端
-            app_auth = FeishuAuthClient(
-                app_id = config.feishu_app_id,
-                app_secret = config.feishu_app_secret,
-                base_url = config.feishu_base_url,
                 http_client = http_client
             )
 
-            # 初始化文档写入服务
-            doc_writer = DocWriterService(
-                auth_client = app_auth,
-                http_client = http_client,
-                base_url = config.feishu_base_url,
-                folder_token = config.feishu_folder_token if request["write_mode"] in {"folder", "both"} else "",
-                convert_max_bytes = config.feishu_convert_max_bytes,
-                chunk_workers = int(request.get("chunk_workers", 2))
-            )
+        enable_llm = request.get("llm_fallback", "toc_ambiguity") == "toc_ambiguity"
+        orchestrator = build_orchestrator(
+            config = config,
+            source_adapter = adapter,
+            http_client = http_client,
+            write_mode = request.get("write_mode", "folder"),
+            dry_run = bool(request.get("dry_run", False)),
+            chunk_workers = int(request.get("chunk_workers", 2)),
+            notify_level = request.get("notify_level", "normal"),
+            enable_llm = enable_llm,
+            chat_id = request.get("chat_id", "") or "",
+            user_token_manager = user_token_manager,
+            allow_missing_chat_id = True
+        )
 
-            # 初始化媒体上传服务
-            media_service = MediaService(
-                auth_client = app_auth,
-                http_client = http_client,
-                base_url = config.feishu_base_url
-            )
-
-            # 初始化 Wiki 服务（如果需要）
-            wiki_service = None
-            user_token_manager = None
-            if request["write_mode"] in {"wiki", "both"}:
-                user_token_manager = FeishuUserTokenManager(
-                    app_id = config.feishu_app_id,
-                    app_secret = config.feishu_app_secret,
-                    base_url = config.feishu_base_url,
-                    http_client = http_client,
-                    access_token = config.feishu_user_access_token,
-                    refresh_token = config.feishu_user_refresh_token,
-                    cache_path = config.feishu_user_token_cache_path
-                )
-
-                wiki_service = WikiService(
-                    auth_client = app_auth,
-                    http_client = http_client,
-                    base_url = config.feishu_base_url,
-                    user_access_token = config.feishu_user_access_token,
-                    user_token_manager = user_token_manager
-                )
-
-            # 初始化通知服务
-            notify_service = None
-            if request.get("notify_level", "normal") != "none":
-                if config.feishu_webhook_url:
-                    notify_service = WebhookNotifyService(
-                        webhook_url = config.feishu_webhook_url,
-                        http_client = http_client,
-                        max_bytes = config.feishu_message_max_bytes
-                    )
-                else:
-                    notify_service = NotifyService(
-                        auth_client = app_auth,
-                        http_client = http_client,
-                        base_url = config.feishu_base_url,
-                        max_bytes = config.feishu_message_max_bytes
-                    )
-
-            # 创建编排器
-            orchestrator = ImportOrchestrator(
-                source_adapter = adapter,
-                markdown_processor = markdown_processor,
-                config = config,
-                doc_writer = doc_writer,
-                media_service = media_service,
-                wiki_service = wiki_service,
-                notify_service = notify_service,
-                llm_client = llm_client
-            )
-
-        # 执行导入
         result = orchestrator.run(
             space_name = request.get("space_name", ""),
             space_id = request.get("space_id", "") or "",
@@ -204,7 +109,6 @@ def start_import_task(self, task_id: str, request: dict):
             chunk_workers = int(request.get("chunk_workers", 2))
         )
 
-        # 更新任务结果
         task.status = TaskStatus.COMPLETED
         task.end_time = time.time()
         task.total = result.total
@@ -221,40 +125,14 @@ def start_import_task(self, task_id: str, request: dict):
         logger.info(f"任务 {task_id} 执行完成")
         return {"status": "success", "result": result}
 
-    except Exception as e:
-        logger.error(f"任务 {task_id} 执行失败: {str(e)}", exc_info = True)
+    except Exception as exc:
+        logger.error("任务 %s 执行失败: %s", task_id, str(exc), exc_info = True)
 
-        # 更新任务状态为失败
         task.status = TaskStatus.FAILED
         task.end_time = time.time()
-        task.message = str(e)
+        task.message = str(exc)
         task.save()
         async_execution = os.getenv("ASYNC_TASK_EXECUTION", "false").lower() == "true"
-        if isinstance(e, ValueError) or not async_execution:
+        if isinstance(exc, ValueError) or not async_execution:
             raise
-        raise self.retry(exc = e, countdown = 30)
-
-
-def _is_placeholder_folder_token(token: str) -> bool:
-    """Check whether one folder token looks like placeholder test value.
-
-    Args:
-        token: Folder token text.
-    """
-
-    normalized = (token or "").strip().lower()
-    if not normalized:
-        return False
-
-    placeholders = {
-        "test_folder_token",
-        "your_folder_token",
-        "example_folder_token",
-        "folder_token",
-        "<folder_token>"
-    }
-    if normalized in placeholders:
-        return True
-    if normalized.startswith("${") and normalized.endswith("}"):
-        return True
-    return False
+        raise self.retry(exc = exc, countdown = 30)

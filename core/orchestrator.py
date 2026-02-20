@@ -1,23 +1,21 @@
-import dataclasses
-import logging
-import multiprocessing
 import os
-import posixpath
 import re
-import urllib.parse
+import sys
+import logging
 import datetime
-
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures import as_completed
+import posixpath
+import dataclasses
+import urllib.parse
+import multiprocessing
 from typing import Any
 from typing import Optional
+from concurrent.futures import as_completed
+from concurrent.futures import ProcessPoolExecutor
+
+sys.path.append(os.getcwd())
 
 from config.config import AppConfig
 from core.orchestration_planner import OrchestrationPlanner
-from integrations.feishu_api import DocWriterService
-from integrations.feishu_api import FeishuAuthClient
-from integrations.feishu_api import MediaService
-from integrations.feishu_api import WikiService
 from data.models import AssetRef
 from data.models import CreatedDocRecord
 from data.models import ImportFailure
@@ -25,52 +23,16 @@ from data.models import ImportManifest
 from data.models import ImportResult
 from data.models import SourceDocument
 from data.source_adapters import SourceAdapter
+from integrations.feishu_api import DocWriterService
+from integrations.feishu_api import FeishuAuthClient
+from integrations.feishu_api import MediaService
+from integrations.feishu_api import WikiService
 from utils.http_client import HttpClient
+from utils.logging_setup import ensure_worker_log_handler
 from utils.markdown_processor import MarkdownProcessor
 
 
 logger = logging.getLogger(__name__)
-
-
-def _ensure_worker_log_handler() -> None:
-    """Attach one stream handler for worker process when root logger is empty.
-
-    Args:
-        None
-    """
-
-    root_logger = logging.getLogger()
-    formatter = logging.Formatter(
-        fmt = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-
-    has_stream_handler = any(
-        isinstance(handler, logging.StreamHandler)
-        and not isinstance(handler, logging.FileHandler)
-        for handler in root_logger.handlers
-    )
-    if not has_stream_handler:
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        root_logger.addHandler(stream_handler)
-
-    log_file_path = os.environ.get("KNOWLEDGE_GENERATOR_LOG_PATH", "").strip()
-    if log_file_path:
-        expected_path = os.path.abspath(log_file_path)
-        has_file_handler = any(
-            isinstance(handler, logging.FileHandler)
-            and os.path.abspath(getattr(handler, "baseFilename", "")) == expected_path
-            for handler in root_logger.handlers
-        )
-        if not has_file_handler:
-            try:
-                file_handler = logging.FileHandler(log_file_path, encoding = "utf-8")
-                file_handler.setFormatter(formatter)
-                root_logger.addHandler(file_handler)
-            except OSError:
-                pass
-
-    root_logger.setLevel(logging.INFO)
 
 
 class InMemorySourceAdapter(SourceAdapter):
@@ -122,7 +84,7 @@ def _process_group_worker(payload: dict[str, Any]) -> dict[str, Any]:
         payload: Serializable worker payload.
     """
 
-    _ensure_worker_log_handler()
+    ensure_worker_log_handler()
 
     group_key = str(payload.get("group_key", "__unknown__"))
     config = AppConfig(**payload["config"])
@@ -1854,7 +1816,12 @@ class ImportOrchestrator:
         if not normalized:
             return ""
 
-        if normalized.lower().endswith(".md"):
+        normalized_lower = normalized.lower()
+        if normalized_lower.endswith(".markdown"):
+            normalized = normalized[:-9]
+        elif normalized_lower.endswith(".docx"):
+            normalized = normalized[:-5]
+        elif normalized_lower.endswith(".md"):
             normalized = normalized[:-3]
 
         segments = [item for item in normalized.split("/") if item]

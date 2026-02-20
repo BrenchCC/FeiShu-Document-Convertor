@@ -1350,7 +1350,7 @@ class DocWriterService(FeishuServiceBase):
                 if not chunk.strip():
                     continue
 
-                # 对表格块直接使用降级策略，避免飞书API参数不合法错误
+                # Fallback for table blocks to avoid Feishu API invalid parameter errors
                 if segment.kind == "table":
                     logger.info(
                         "Direct fallback for table block: document_id = %s, segment = %d/%d",

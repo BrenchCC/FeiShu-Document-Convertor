@@ -1,4 +1,5 @@
 import os
+import pathlib
 
 from dataclasses import dataclass
 
@@ -55,7 +56,7 @@ class AppConfig:
             cls: Class reference used by dataclass factory.
         """
 
-        _load_dotenv_if_exists()
+        load_dotenv_if_exists()
 
         return cls(
             feishu_base_url = os.getenv("FEISHU_BASE_URL", "https://open.feishu.cn").rstrip("/"),
@@ -88,31 +89,41 @@ class AppConfig:
         )
 
 
-def _load_dotenv_if_exists(dotenv_path: str = ".env") -> None:
+def get_project_root() -> pathlib.Path:
+    """Return project root directory path.
+
+    Args:
+        None
+    """
+
+    return pathlib.Path(__file__).resolve().parent.parent
+
+
+def load_dotenv_if_exists(dotenv_path: str = ".env") -> None:
     """Load .env key-values into process env if file exists.
 
     Args:
-        dotenv_path: .env file path.
+        dotenv_path: .env file path relative to CWD and project root.
     """
 
-    # 尝试从项目根目录加载 .env 文件
-    # 项目根目录是 config 目录的父目录
-    import pathlib
-    project_root = pathlib.Path(__file__).parent.parent
-    env_path = project_root / dotenv_path
+    candidate_paths = [
+        pathlib.Path(os.getcwd()) / dotenv_path,
+        get_project_root() / dotenv_path
+    ]
 
-    if not env_path.exists():
-        return
+    for env_path in candidate_paths:
+        if not env_path.exists():
+            continue
 
-    with open(env_path, "r", encoding = "utf-8") as fp:
-        for raw_line in fp:
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
+        with open(env_path, "r", encoding = "utf-8") as fp:
+            for raw_line in fp:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
