@@ -1,7 +1,7 @@
 """
-API接口测试
+API integration tests.
 
-测试FastAPI接口的功能和性能
+Validate FastAPI endpoints for core flows and error handling.
 """
 
 import json
@@ -18,16 +18,16 @@ from web.main import app
 
 @pytest.fixture
 def client():
-    """创建测试客户端"""
+    """Create a FastAPI test client."""
     with TestClient(app) as test_client:
         yield test_client
 
 
 class TestSystemAPI:
-    """系统管理API测试"""
+    """System management API tests."""
 
     def test_health_check(self, client):
-        """测试健康检查接口"""
+        """Verify health check endpoint."""
         response = client.get("/health")
         assert response.status_code == 200
         data = response.json()
@@ -35,7 +35,7 @@ class TestSystemAPI:
         assert data["status"] == "ok"
 
     def test_get_system_info(self, client):
-        """测试获取系统信息"""
+        """Verify system info endpoint."""
         response = client.get("/api/system/info")
         assert response.status_code == 200
         data = response.json()
@@ -46,7 +46,7 @@ class TestSystemAPI:
         assert len(data["features"]) > 0
 
     def test_get_system_config(self, client):
-        """测试获取系统配置"""
+        """Verify system config endpoint."""
         response = client.get("/api/system/config")
         assert response.status_code == 200
         data = response.json()
@@ -61,14 +61,14 @@ class TestSystemAPI:
 
 
 class TestSourcesAPI:
-    """源管理API测试"""
+    """Source management API tests."""
 
     @patch("web.api.sources.LocalSourceAdapter.list_markdown")
     @patch("os.path.exists")
     @patch("os.path.isdir")
     def test_scan_local_directory_success(self, mock_isdir, mock_exists, mock_list, client):
-        """测试扫描本地目录成功"""
-        # 模拟路径验证
+        """Verify scanning a local directory succeeds."""
+        # Mock path validation.
         mock_exists.return_value = True
         mock_isdir.return_value = True
 
@@ -93,14 +93,14 @@ class TestSourcesAPI:
             assert len(data["files"]) == 2
 
     def test_scan_local_directory_invalid_path(self, client):
-        """测试扫描无效路径"""
+        """Verify scan rejects invalid paths."""
         response = client.get("/api/sources/local/scan?path=/invalid/path&recursive=true")
         assert response.status_code == 404
 
     @patch("web.api.sources.GitHubSourceAdapter")
     def test_clone_github_repo_success(self, mock_adapter, client):
-        """测试克隆GitHub仓库成功"""
-        # 创建模拟的GitHubSourceAdapter实例
+        """Verify cloning a GitHub repo succeeds."""
+        # Create a mocked GitHubSourceAdapter instance.
         mock_instance = mock_adapter.return_value
         mock_instance.list_markdown.return_value = [
             "docs/01-intro.md",
@@ -125,7 +125,7 @@ class TestSourcesAPI:
             assert len(data["files"]) > 0
 
     def test_validate_github_repo_success(self, client):
-        """测试验证GitHub仓库成功"""
+        """Verify GitHub repo validation succeeds."""
         with patch("requests.get") as mock_get:
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -140,7 +140,7 @@ class TestSourcesAPI:
             assert "message" in data
 
     def test_validate_github_repo_invalid_format(self, client):
-        """测试验证无效格式的GitHub仓库"""
+        """Verify GitHub repo validation rejects invalid format."""
         response = client.post("/api/sources/github/validate", json={
             "repo": "invalid-repo-format"
         })
@@ -148,7 +148,7 @@ class TestSourcesAPI:
 
     @patch("web.api.sources.pick_local_path")
     def test_pick_local_path_success(self, mock_pick_local_path, client):
-        """测试本地路径选择成功"""
+        """Verify local path selection succeeds."""
         mock_pick_local_path.return_value = "/Users/demo/docs"
 
         response = client.post("/api/sources/local/pick", json={
@@ -163,7 +163,7 @@ class TestSourcesAPI:
 
     @patch("web.api.sources.pick_local_path")
     def test_pick_local_path_cancelled(self, mock_pick_local_path, client):
-        """测试本地路径选择取消"""
+        """Verify local path selection cancellation."""
         mock_pick_local_path.side_effect = source_api.PickerCancelledError("cancel")
 
         response = client.post("/api/sources/local/pick", json={
@@ -176,7 +176,7 @@ class TestSourcesAPI:
 
     @patch("web.api.sources.pick_local_path")
     def test_pick_local_path_unavailable(self, mock_pick_local_path, client):
-        """测试无GUI环境下本地路径选择失败"""
+        """Verify local path selection fails in headless mode."""
         mock_pick_local_path.side_effect = source_api.PickerUnavailableError("headless")
 
         response = client.post("/api/sources/local/pick", json={
@@ -188,7 +188,7 @@ class TestSourcesAPI:
         assert "无法打开系统选择器" in data["detail"]
 
     def test_upload_local_directory_success(self, client):
-        """测试上传本地目录文件成功"""
+        """Verify uploading a local directory succeeds."""
         entries = [
             {"relative_path": "docs/a.md"},
             {"relative_path": "docs/sub/b.md"}
@@ -215,7 +215,7 @@ class TestSourcesAPI:
         shutil.rmtree(data["path"], ignore_errors = True)
 
     def test_upload_local_file_success(self, client):
-        """测试上传本地单文件成功"""
+        """Verify uploading a single local file succeeds."""
         entries = [{"relative_path": "single.md"}]
         response = client.post(
             "/api/sources/local/upload",
@@ -237,7 +237,7 @@ class TestSourcesAPI:
 
 
 class TestImportAPI:
-    """导入管理API测试"""
+    """Import API tests."""
 
     @patch("os.environ.get")
     @patch("web.tasks.import_task.start_import_task")
@@ -245,15 +245,15 @@ class TestImportAPI:
     @patch("os.path.exists")
     @patch("os.path.isdir")
     def test_start_import_success(self, mock_isdir, mock_exists, mock_task_model, mock_task, mock_env, client):
-        """测试启动导入任务成功"""
-        # 模拟路径验证
+        """Verify starting an import task succeeds."""
+        # Mock path validation.
         mock_exists.return_value = True
         mock_isdir.return_value = True
 
-        # 模拟环境变量
+        # Mock environment variables.
         mock_env.return_value = "true"
 
-        # 模拟Task模型
+        # Mock Task model.
         mock_task_instance = MagicMock()
         mock_task_instance.task_id = "test-task-id"
         mock_task_model.return_value = mock_task_instance
@@ -273,7 +273,7 @@ class TestImportAPI:
             "folder_root_subdir": True,
             "folder_root_subdir_name": "batch_demo",
             "folder_nav_doc": False,
-            "folder_nav_title": "导航",
+            "folder_nav_title": "Navigation",
             "llm_fallback": "off",
             "llm_max_calls": 5,
             "skip_root_readme": True,
@@ -304,14 +304,14 @@ class TestImportAPI:
     @patch("os.path.exists")
     @patch("os.path.isdir")
     def test_start_import_invalid_source(self, mock_isdir, mock_exists, mock_task_model, mock_task, mock_env, client):
-        """测试启动无效源类型的导入任务"""
-        # 模拟路径验证
+        """Verify starting with an invalid source type fails."""
+        # Mock path validation.
         mock_exists.return_value = True
         mock_isdir.return_value = True
 
-        # 模拟异步执行
+        # Mock async execution.
         mock_env.return_value = "true"
-        mock_task.delay.side_effect = ValueError("不支持的源类型")
+        mock_task.delay.side_effect = ValueError("Unsupported source type")
 
         mock_task_instance = MagicMock()
         mock_task_instance.task_id = "test-task-id"
@@ -327,7 +327,7 @@ class TestImportAPI:
 
     @patch("web.models.task.Task.get")
     def test_get_import_status_not_found(self, mock_get, client):
-        """测试获取不存在的任务状态"""
+        """Verify import status returns 404 for missing task."""
         mock_get.return_value = None
 
         response = client.get("/api/import/status/nonexistent-task-id")
@@ -335,11 +335,11 @@ class TestImportAPI:
 
 
 class TestTasksAPI:
-    """任务管理API测试"""
+    """Task management API tests."""
 
     @patch("web.api.tasks.Task.get_all")
     def test_get_tasks(self, mock_get_all, client):
-        """测试获取任务列表"""
+        """Verify task list endpoint returns items."""
         mock_tasks = []
 
         class MockTask:
@@ -376,12 +376,12 @@ class TestTasksAPI:
 
 
 class TestNotificationsAPI:
-    """通知管理API测试"""
+    """Notification API tests."""
 
     @patch("web.api.notifications.WebhookNotifyService.send_status")
     @patch("web.api.notifications.NotifyService.send_status")
     def test_test_notification(self, mock_chat_notify, mock_webhook_notify, client):
-        """测试通知功能"""
+        """Verify notification test endpoint."""
         response = client.post("/api/notifications/test", json={
             "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test",
             "chat_id": "oc_1234567890abcdef1234567890abcdef",
@@ -397,10 +397,10 @@ class TestNotificationsAPI:
 
 
 class TestAPIErrorHandling:
-    """API错误处理测试"""
+    """API error handling tests."""
 
     def test_non_existent_endpoint(self, client):
-        """测试访问不存在的端点"""
+        """Verify 404 for non-existent endpoints."""
         response = client.get("/api/non_existent_endpoint")
         assert response.status_code == 404
 
@@ -408,8 +408,8 @@ class TestAPIErrorHandling:
     @patch("os.path.exists")
     @patch("os.path.isdir")
     def test_scan_directory_exception(self, mock_isdir, mock_exists, mock_list, client):
-        """测试扫描目录异常"""
-        # 模拟路径验证
+        """Verify scan returns 500 on exceptions."""
+        # Mock path validation.
         mock_exists.return_value = True
         mock_isdir.return_value = True
 
@@ -422,5 +422,5 @@ class TestAPIErrorHandling:
 
 
 if __name__ == "__main__":
-    # 运行所有测试
+    # Run all tests.
     pytest.main([__file__, "-v"])

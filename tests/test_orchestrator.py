@@ -433,7 +433,7 @@ class FakeLlmFolderNav:
         """
 
         return (
-            "# 导航\n\n"
+            "# Navigation\n\n"
             "- [Chapter 1](a/ch1.md)\n"
             "- [Chapter 2](b/ch2.md)\n"
         )
@@ -518,7 +518,7 @@ class CaptureContextLlmFolderNav:
             target_path = str(documents[0].get("path", "")).strip()
         if not target_path:
             return ""
-        return f"# 导航\n\n- [First]({target_path})\n"
+        return f"# Navigation\n\n- [First]({target_path})\n"
 
 
 class EmptyLlmFolderNav:
@@ -808,11 +808,11 @@ class TestImportOrchestrator(unittest.TestCase):
             notify_level = "none"
         )
         doc = SourceDocument(
-            path = "Part7-生产架构/README.md",
-            title = "《AI Agent 架构：从单体到企业级多智能体》",
+            path = "Part7-Production-Architecture/README.md",
+            title = "AI Agent Architecture: Monolith to Enterprise Multi-Agent",
             markdown = "# overview",
             assets = [],
-            relative_dir = "Part7-生产架构",
+            relative_dir = "Part7-Production-Architecture",
             base_ref = "/tmp",
             source_type = "local"
         )
@@ -839,7 +839,7 @@ class TestImportOrchestrator(unittest.TestCase):
 
         self.assertEqual(result.success, 1)
         self.assertEqual(result.failed, 0)
-        self.assertEqual(writer.created_titles[0], "Part7-生产架构")
+        self.assertEqual(writer.created_titles[0], "Part7-Production-Architecture")
 
     def test_retry_create_doc_with_path_based_title_on_invalid_param(self) -> None:
         """Title fallback should retry with path-based title when invalid.
@@ -866,11 +866,11 @@ class TestImportOrchestrator(unittest.TestCase):
             notify_level = "none"
         )
         doc = SourceDocument(
-            path = "Part2-工具与扩展/第03章：工具调用基础.md",
-            title = "第 3 章：工具调用基础",
+            path = "Part2-Tools-and-Extensions/Chapter03-Tool-Calling-Basics.md",
+            title = "Chapter 3: Tool Calling Basics",
             markdown = "# chapter",
             assets = [],
-            relative_dir = "Part2-工具与扩展",
+            relative_dir = "Part2-Tools-and-Extensions",
             base_ref = "/tmp",
             source_type = "local"
         )
@@ -898,8 +898,11 @@ class TestImportOrchestrator(unittest.TestCase):
         self.assertEqual(result.success, 1)
         self.assertEqual(result.failed, 0)
         self.assertEqual(len(writer.created_titles), 2)
-        self.assertEqual(writer.created_titles[0], "第 3 章：工具调用基础")
-        self.assertEqual(writer.created_titles[1], "Part2-工具与扩展 - 第03章：工具调用基础")
+        self.assertEqual(writer.created_titles[0], "Chapter 3 Tool Calling Basics")
+        self.assertEqual(
+            writer.created_titles[1],
+            "Part2-Tools-and-Extensions - Chapter03-Tool-Calling-Basics"
+        )
 
     def test_root_readme_kept_from_import_by_default(self) -> None:
         """Root README should be imported when skip flag is disabled.
@@ -927,7 +930,7 @@ class TestImportOrchestrator(unittest.TestCase):
         )
         doc = SourceDocument(
             path = "README.md",
-            title = "《AI Agent 架构：从单体到企业级多智能体》",
+            title = "AI Agent Architecture: Monolith to Enterprise Multi-Agent",
             markdown = "# root",
             assets = [],
             relative_dir = "",
@@ -987,7 +990,7 @@ class TestImportOrchestrator(unittest.TestCase):
         )
         doc = SourceDocument(
             path = "README.md",
-            title = "《AI Agent 架构：从单体到企业级多智能体》",
+            title = "AI Agent Architecture: Monolith to Enterprise Multi-Agent",
             markdown = "# root",
             assets = [],
             relative_dir = "",

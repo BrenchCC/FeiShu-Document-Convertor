@@ -36,7 +36,7 @@ class TestMainLogging(unittest.TestCase):
             )
             self.assertNotEqual(first, second)
 
-    def test_cleanup_old_log_files_keeps_latest_eight(self) -> None:
+    def test_cleanup_old_log_files_keeps_latest_ten(self) -> None:
         """Cleanup should keep only the latest files under same prefix.
 
         Args:
@@ -45,7 +45,7 @@ class TestMainLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             kept_indexes = set()
-            for index in range(10):
+            for index in range(12):
                 path = os.path.join(
                     temp_dir,
                     f"knowledge_generator_20260219_120000_{index}.log"
@@ -64,7 +64,7 @@ class TestMainLogging(unittest.TestCase):
             _cleanup_old_log_files(
                 log_dir = temp_dir,
                 log_prefix = "knowledge_generator",
-                max_files = 8
+                max_files = 10
             )
 
             remaining = sorted(
@@ -73,7 +73,7 @@ class TestMainLogging(unittest.TestCase):
                 if filename.startswith("knowledge_generator_")
                 and filename.endswith(".log")
             )
-            self.assertEqual(len(remaining), 8)
+            self.assertEqual(len(remaining), 10)
             remaining_indexes = {
                 int(filename.rsplit("_", 1)[-1].replace(".log", ""))
                 for filename in remaining

@@ -708,7 +708,7 @@ class TestFeishuApiOptimizations(unittest.TestCase):
             convert_max_bytes = 20
         )
 
-        long_name = "测" * 120
+        long_name = "x" * 120
         doc_writer.ensure_folder_path(relative_dir = long_name)
 
         create_folder_calls = [

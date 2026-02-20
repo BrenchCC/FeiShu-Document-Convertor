@@ -183,7 +183,7 @@ class TestMainArgs(unittest.TestCase):
             "docs/toc.md",
             "--no-folder-nav-doc",
             "--folder-nav-title",
-            "目录总览",
+            "Directory Overview",
             "--llm-fallback",
             "off",
             "--llm-max-calls",
@@ -195,7 +195,7 @@ class TestMainArgs(unittest.TestCase):
         self.assertEqual(args.structure_order, "path")
         self.assertEqual(args.toc_file, "docs/toc.md")
         self.assertEqual(args.folder_nav_doc, False)
-        self.assertEqual(args.folder_nav_title, "目录总览")
+        self.assertEqual(args.folder_nav_title, "Directory Overview")
         self.assertEqual(args.llm_fallback, "off")
         self.assertEqual(args.llm_max_calls, 0)
 
