@@ -1,19 +1,22 @@
-"""
-源管理API
+"""Source management API.
 
-提供本地目录扫描和GitHub仓库克隆功能
+Provides local scanning and GitHub clone helpers.
 """
 
-import json
-import logging
 import os
-import posixpath
-import tempfile
+import sys
+import json
 import uuid
-from typing import List, Optional
+import logging
+import tempfile
+import posixpath
+from typing import List
+from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+
+sys.path.append(os.getcwd())
 
 from data.source_adapters import LocalSourceAdapter, GitHubSourceAdapter
 from web.utils.native_picker import PickerCancelledError, PickerUnavailableError
@@ -24,14 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 class ScanRequest(BaseModel):
-    """扫描请求"""
+    """Local scan request."""
     path: str
     recursive: bool = True
-    extensions: List[str] = ["md", "markdown"]
+    extensions: List[str] = ["md", "markdown", "docx"]
 
 
 class ScanResult(BaseModel):
-    """扫描结果"""
+    """Local scan result."""
     total_files: int
     markdown_files: int
     other_files: int
@@ -39,7 +42,7 @@ class ScanResult(BaseModel):
 
 
 class GitHubCloneRequest(BaseModel):
-    """GitHub克隆请求"""
+    """GitHub clone request."""
     repo: str
     branch: Optional[str] = None
     commit: Optional[str] = None
@@ -47,7 +50,7 @@ class GitHubCloneRequest(BaseModel):
 
 
 class GitHubCloneResult(BaseModel):
-    """GitHub克隆结果"""
+    """GitHub clone result."""
     repo: str
     branch: Optional[str] = None
     commit: Optional[str] = None
@@ -56,19 +59,19 @@ class GitHubCloneResult(BaseModel):
 
 
 class LocalPickRequest(BaseModel):
-    """本地路径选择请求"""
+    """Local path picker request."""
     target: str = "directory"
-    extensions: List[str] = ["md", "markdown"]
+    extensions: List[str] = ["md", "markdown", "docx"]
 
 
 class LocalPickResult(BaseModel):
-    """本地路径选择结果"""
+    """Local path picker result."""
     path: str
     target: str
 
 
 class LocalUploadResult(BaseModel):
-    """本地上传选择结果"""
+    """Local upload result."""
     path: str
     target: str
     file_count: int
@@ -78,9 +81,9 @@ class LocalUploadResult(BaseModel):
 async def scan_local_directory(
     path: str,
     recursive: bool = True,
-    extensions: List[str] = ["md", "markdown"]
+    extensions: List[str] = ["md", "markdown", "docx"]
 ):
-    """扫描本地目录"""
+    """Scan local directory for supported import files."""
     try:
         logger.info(f"开始扫描本地目录: {path}")
 
@@ -96,7 +99,7 @@ async def scan_local_directory(
         markdown_files = [f for f in files if f.lower().endswith(tuple(extensions))]
         other_files = [f for f in files if f.lower().endswith(tuple(extensions)) is False]
 
-        logger.info(f"扫描完成: {len(markdown_files)}个Markdown文件，{len(other_files)}个其他文件")
+        logger.info(f"扫描完成: {len(markdown_files)}个可导入文件，{len(other_files)}个其他文件")
 
         return {
             "total_files": len(files),
@@ -179,7 +182,7 @@ async def upload_local_source(
 
 @router.post("/local/pick", response_model = LocalPickResult)
 async def pick_local_source_path(request: LocalPickRequest):
-    """通过系统原生选择器选择本地目录或文件。"""
+    """Pick local directory or file via native picker."""
     try:
         target = request.target.strip().lower()
         selected_path = pick_local_path(
@@ -207,7 +210,7 @@ async def pick_local_source_path(request: LocalPickRequest):
 
 @router.post("/github/clone", response_model = GitHubCloneResult)
 async def clone_github_repo(request: GitHubCloneRequest):
-    """克隆GitHub仓库"""
+    """Clone a GitHub repository."""
     try:
         logger.info(f"开始克隆GitHub仓库: {request.repo}")
 
@@ -215,11 +218,11 @@ async def clone_github_repo(request: GitHubCloneRequest):
         if not temp_dir:
             temp_dir = tempfile.mkdtemp(prefix = "github_")
 
-        # 创建HTTP客户端
+        # Create HTTP client
         from utils.http_client import HttpClient
         http_client = HttpClient()
 
-        # 使用GitHubSourceAdapter克隆仓库
+        # Clone via GitHubSourceAdapter
         adapter = GitHubSourceAdapter(
             repo = request.repo,
             ref = request.branch or "main",
@@ -227,13 +230,13 @@ async def clone_github_repo(request: GitHubCloneRequest):
             http_client = http_client
         )
 
-        # 触发仓库克隆和准备
+        # Trigger clone and prepare
         adapter.list_markdown()
 
-        # 获取仓库路径
+        # Resolve repo path
         repo_path = str(adapter._repo_root)
 
-        # 扫描克隆后的仓库
+        # Scan cloned repo
         files = []
         for root, _, filenames in os.walk(repo_path):
             for filename in filenames:
@@ -257,16 +260,16 @@ async def clone_github_repo(request: GitHubCloneRequest):
 
 @router.post("/github/validate")
 async def validate_github_repo(request: dict):
-    """验证GitHub仓库权限"""
+    """Validate GitHub repository access."""
     try:
         repo = request.get("repo")
         logger.info(f"开始验证GitHub仓库: {repo}")
 
-        # 简单的验证：检查仓库是否符合格式
+        # Basic validation: owner/repo format
         if not repo or "/" not in repo or len(repo.split("/")) != 2:
             raise HTTPException(status_code = 400, detail = "仓库格式不正确，应为 owner/repo")
 
-        # 尝试获取仓库信息（不需要token，因为是公开仓库）
+        # Try to fetch repo metadata (public access)
         import requests
         url = f"https://github.com/{repo}"
         response = requests.get(url, allow_redirects = True)

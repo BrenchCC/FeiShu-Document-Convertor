@@ -167,7 +167,7 @@ class FeishuImportApp {
         if (source === 'local') {
             const localPath = this.getElementValue('localPath').trim();
             if (!localPath) {
-                const targetName = this.getImportType() === 'file' ? 'Markdown 文件' : '本地目录';
+                const targetName = this.getImportType() === 'file' ? '文档文件（.md/.markdown/.docx）' : '本地目录';
                 this.showToast(`请选择${targetName}路径`, 'error');
                 return false;
             }
@@ -487,7 +487,7 @@ class FeishuImportApp {
 
     inferSelectionTarget() {
         const localPath = this.getElementValue('localPath').trim().toLowerCase();
-        if (localPath.endsWith('.md') || localPath.endsWith('.markdown')) {
+        if (localPath.endsWith('.md') || localPath.endsWith('.markdown') || localPath.endsWith('.docx')) {
             return 'file';
         }
         if (localPath) {

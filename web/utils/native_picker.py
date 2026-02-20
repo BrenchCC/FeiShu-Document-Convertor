@@ -14,7 +14,7 @@ class PickerCancelledError(RuntimeError):
 
 
 def pick_local_path(target: str, extensions: Sequence[str] | None = None) -> str:
-    """Pick one local directory or markdown file via native system dialog.
+    """Pick one local directory or markdown/docx file via native system dialog.
 
     Args:
         target: Picker target, one of "directory" or "file".
@@ -47,7 +47,7 @@ def pick_local_path(target: str, extensions: Sequence[str] | None = None) -> str
             file_patterns = [f"*.{ext}" for ext in normalized_extensions]
             selected_path = filedialog.askopenfilename(
                 filetypes = [
-                    ("Markdown files", " ".join(file_patterns)),
+                    ("Document files", " ".join(file_patterns)),
                     ("All files", "*.*")
                 ]
             )
@@ -71,7 +71,7 @@ def _normalize_extensions(extensions: Sequence[str] | None) -> list[str]:
     """
 
     if not extensions:
-        return ["md", "markdown"]
+        return ["md", "markdown", "docx"]
 
     result = []
     for item in extensions:
@@ -80,6 +80,5 @@ def _normalize_extensions(extensions: Sequence[str] | None) -> list[str]:
             continue
         result.append(value)
     if not result:
-        return ["md", "markdown"]
+        return ["md", "markdown", "docx"]
     return result
-

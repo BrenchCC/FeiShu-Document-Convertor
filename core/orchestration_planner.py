@@ -70,6 +70,7 @@ class OrchestrationPlanner:
     """Build stable import ordering from markdown paths and optional TOC."""
 
     MD_LINK_PATTERN = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>[^)]+)\)")
+    SUPPORTED_TOC_TARGET_SUFFIXES = (".md", ".markdown", ".docx")
     INDEX_STEMS = {"readme", "index", "table_of_contents", "toc"}
     ROOT_FILTER_STEMS = {"readme"}
 
@@ -398,7 +399,7 @@ class OrchestrationPlanner:
                 normalized_target = self._normalize_link_target(target = target, toc_dir = "")
                 if not normalized_target:
                     continue
-                if not normalized_target.lower().endswith(".md"):
+                if not normalized_target.lower().endswith(self.SUPPORTED_TOC_TARGET_SUFFIXES):
                     continue
                 links.append(
                     TocLinkRef(

@@ -11,6 +11,14 @@ from typing import List
 
 from data.models import SourceDocument
 from utils.http_client import HttpClient
+from utils.docx_converter import convert_docx_to_markdown
+
+
+LOCAL_MD_IMAGE_PATTERN = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)]+)\)")
+LOCAL_HTML_IMAGE_PATTERN = re.compile(
+    r"<img\s+[^>]*src=[\"'](?P<url>[^\"']+)[\"'][^>]*>",
+    flags = re.IGNORECASE
+)
 
 
 class SourceAdapter(abc.ABC):
@@ -35,7 +43,7 @@ class SourceAdapter(abc.ABC):
 
 
 class LocalSourceAdapter(SourceAdapter):
-    """Source adapter for local markdown directory or one markdown file.
+    """Source adapter for local markdown/docx directory or one file.
 
     Args:
         root_path: Local root directory path.
@@ -47,6 +55,8 @@ class LocalSourceAdapter(SourceAdapter):
         self._file_mode = self._root_path_obj.is_file()
         self._source_root = self._root_path_obj.parent if self._file_mode else self._root_path_obj
         self._single_relative_path = self._root_path_obj.name if self._file_mode else ""
+        self._docx_temp_dir = tempfile.TemporaryDirectory(prefix = "kg_docx_")
+        self._docx_conversion_cache: dict[str, tuple[str, str]] = {}
 
     def list_markdown(self) -> List[str]:
         """Collect markdown files from local root.
@@ -56,13 +66,13 @@ class LocalSourceAdapter(SourceAdapter):
         """
 
         if self._file_mode:
-            if _is_markdown_path(path = self._root_path_obj):
+            if _is_local_supported_path(path = self._root_path_obj):
                 return [self._single_relative_path]
             return []
 
         result = []
         for path in self._root_path_obj.rglob("*"):
-            if not _is_markdown_path(path = path):
+            if not _is_local_supported_path(path = path):
                 continue
             relative = str(path.relative_to(self._source_root)).replace("\\", "/")
             result.append(relative)
@@ -81,12 +91,23 @@ class LocalSourceAdapter(SourceAdapter):
             raise FileNotFoundError(f"Local markdown path not found: {relative_path}")
 
         full_path = self._source_root / normalized_relative_path
-        markdown = full_path.read_text(encoding = "utf-8", errors = "ignore")
+        if full_path.suffix.lower() == ".docx":
+            markdown, base_ref = self._read_docx_as_markdown(
+                normalized_relative_path = normalized_relative_path,
+                full_path = full_path
+            )
+        else:
+            markdown = full_path.read_text(encoding = "utf-8", errors = "ignore")
+            markdown = self._normalize_local_image_paths(
+                markdown = markdown,
+                base_dirs = [full_path.parent, self._source_root]
+            )
+            base_ref = str(full_path.parent)
+
         title = _extract_title(markdown = markdown, relative_path = normalized_relative_path)
         relative_dir = str(Path(normalized_relative_path).parent).replace("\\", "/")
         if relative_dir == ".":
             relative_dir = ""
-        base_ref = str(full_path.parent)
         return SourceDocument(
             path = normalized_relative_path,
             title = title,
@@ -96,6 +117,151 @@ class LocalSourceAdapter(SourceAdapter):
             base_ref = base_ref,
             source_type = "local"
         )
+
+    def close(self) -> None:
+        """Release temporary DOCX conversion workspace.
+
+        Args:
+            self: Adapter instance.
+        """
+
+        if self._docx_temp_dir is not None:
+            self._docx_temp_dir.cleanup()
+            self._docx_temp_dir = None
+
+    def __del__(self) -> None:
+        """Ensure temporary workspace cleanup on object deletion.
+
+        Args:
+            self: Adapter instance.
+        """
+
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _read_docx_as_markdown(
+        self,
+        normalized_relative_path: str,
+        full_path: Path
+    ) -> tuple[str, str]:
+        """Convert local DOCX to markdown and return markdown/base_ref.
+
+        Args:
+            normalized_relative_path: Source-relative local path.
+            full_path: Absolute DOCX path.
+        """
+
+        cached = self._docx_conversion_cache.get(normalized_relative_path)
+        if cached:
+            return cached
+
+        relative_without_suffix = Path(normalized_relative_path).with_suffix("")
+        output_dir = Path(self._docx_temp_dir.name) / relative_without_suffix
+        try:
+            conversion = convert_docx_to_markdown(
+                docx_path = str(full_path),
+                output_dir = str(output_dir),
+                track_changes = "accept"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"DOCX convert failed: path = {normalized_relative_path}, error = {str(exc)}"
+            ) from exc
+
+        result = (
+            self._normalize_local_image_paths(
+                markdown = conversion.markdown,
+                base_dirs = [
+                    Path(conversion.markdown_path).parent,
+                    full_path.parent,
+                    self._source_root
+                ]
+            ),
+            str(Path(conversion.markdown_path).parent)
+        )
+        self._docx_conversion_cache[normalized_relative_path] = result
+        return result
+
+    def _normalize_local_image_paths(
+        self,
+        markdown: str,
+        base_dirs: list[Path]
+    ) -> str:
+        """Normalize local image urls in markdown.
+
+        Args:
+            markdown: Markdown text.
+            base_dirs: Candidate base directories for relative image lookup.
+        """
+
+        def _replace_md(match: re.Match) -> str:
+            alt = match.group("alt")
+            image_url = match.group("url")
+            resolved = self._resolve_local_image_url(
+                image_url = image_url,
+                base_dirs = base_dirs
+            )
+            return f"![{alt}]({resolved})"
+
+        def _replace_html(match: re.Match) -> str:
+            image_url = match.group("url")
+            resolved = self._resolve_local_image_url(
+                image_url = image_url,
+                base_dirs = base_dirs
+            )
+            return match.group(0).replace(image_url, resolved)
+
+        rewritten = LOCAL_MD_IMAGE_PATTERN.sub(_replace_md, markdown)
+        rewritten = LOCAL_HTML_IMAGE_PATTERN.sub(_replace_html, rewritten)
+        return rewritten
+
+    def _resolve_local_image_url(
+        self,
+        image_url: str,
+        base_dirs: list[Path]
+    ) -> str:
+        """Resolve one markdown image url into concrete local path.
+
+        Args:
+            image_url: Raw image url extracted from markdown.
+            base_dirs: Candidate base directories for relative image lookup.
+        """
+
+        normalized = (image_url or "").strip().strip('"').strip("'")
+        if not normalized:
+            return image_url
+        if normalized.startswith("http://") or normalized.startswith("https://"):
+            return normalized
+        if normalized.startswith("data:"):
+            return normalized
+
+        parsed = urllib.parse.urlparse(normalized)
+        if parsed.scheme:
+            return normalized
+
+        # Remove query/fragment and decode path text for local filesystem probe.
+        path_text = urllib.parse.unquote(parsed.path or normalized)
+        if not path_text:
+            return normalized
+
+        direct_path = Path(path_text)
+        if direct_path.is_absolute() and direct_path.exists():
+            return str(direct_path.resolve())
+
+        deduplicated_base_dirs: list[Path] = []
+        for base_dir in base_dirs:
+            if base_dir not in deduplicated_base_dirs:
+                deduplicated_base_dirs.append(base_dir)
+
+        for base_dir in deduplicated_base_dirs:
+            candidate = (base_dir / path_text).resolve()
+            if candidate.exists():
+                return str(candidate)
+
+        # Keep original text when no concrete path can be inferred.
+        return normalized
 
 
 class GitHubSourceAdapter(SourceAdapter):
@@ -397,3 +563,15 @@ def _is_markdown_path(path: Path) -> bool:
     if not path.is_file():
         return False
     return path.suffix.lower() in {".md", ".markdown"}
+
+
+def _is_local_supported_path(path: Path) -> bool:
+    """Check whether one local path is supported by local source adapter.
+
+    Args:
+        path: Local filesystem path.
+    """
+
+    if not path.is_file():
+        return False
+    return path.suffix.lower() in {".md", ".markdown", ".docx"}
