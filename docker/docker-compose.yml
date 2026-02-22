@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 8000
+      WEB_RELOAD: "false"
+    volumes:
+      - ../storage:/app/storage
+      - ../uploads:/app/uploads
+      - ../temp:/app/temp
+
+  cli:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: >-
+      python main.py --source local --path /data --write-mode folder --dry-run --notify-level none
+    volumes:
+      - ../:/app
+      - ../data:/data

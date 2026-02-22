@@ -151,6 +151,27 @@ python web/main.py
 
 默认监听 `0.0.0.0:8000`。
 
+## 🐳 Docker 运行
+
+### 构建镜像
+
+```bash
+docker build -f docker/Dockerfile -t feishu-doc-convertor .
+```
+
+### 使用 Docker Compose
+
+```bash
+docker-compose -f ./docker/docker-compose.yml up -d
+```
+
+单独启动服务：
+
+```bash
+docker-compose -f ./docker/docker-compose.yml up -d server
+docker-compose -f ./docker/docker-compose.yml up -d cli
+```
+
 ### Web 控制台功能
 
 - 本地文件/目录导入
